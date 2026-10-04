@@ -33,13 +33,25 @@ It never installs or changes anything by itself. The only button that writes fil
 2. The launcher AppImage: found, executable, FUSE 2 installed
 3. Game files (`mnm.exe` and core files) next to the AppImage
 4. `umu-run`: on the launcher's `PATH`, actually runs, wrapper in place
-5. GE-Proton, the Steam Linux Runtime, the Vulkan loader and a Vulkan driver for your GPU
+5. GE-Proton, the Steam Linux Runtime, the Vulkan loader, a Vulkan driver for your GPU (and AMDVLK conflicts), and laptops with two GPUs
 6. The game's Wine prefix
 7. Errors in the launcher's last log
+8. Python and PyGObject/GTK
 
 ## Requirements
 
-- Python 3 with PyGObject and GTK 4 or 3. GNOME, Ubuntu, Fedora, Bazzite and SteamOS already have these. If yours doesn't, the tool prints the install command for your distro and runs the same check in the terminal.
+Python 3 (`umu-run` needs it too) plus PyGObject with GTK 4 or 3 for the window. GNOME, Ubuntu, Linux Mint, Fedora, Bazzite and SteamOS usually have these already. If they're missing, the check shows the command for your distro, and the window falls back to the terminal check.
+
+| Distro | Install command |
+| --- | --- |
+| Arch, CachyOS, Manjaro, EndeavourOS | `sudo pacman -S --needed python python-gobject gtk4` |
+| Ubuntu, Linux Mint, Debian, Pop!_OS | `sudo apt install python3 python3-gi gir1.2-gtk-4.0` |
+| Fedora, Nobara | `sudo dnf install python3 python3-gobject gtk4` |
+| openSUSE | `sudo zypper install python3 python3-gobject-Gdk typelib-1_0-Gtk-4_0` |
+
+### Laptops with two GPUs
+
+On laptops with an integrated plus a discrete GPU, the game can start on the slow integrated GPU, or sit on "Game is running" with no window (NVIDIA Optimus). The check detects this, and **Apply launcher fix…** makes the game use the discrete GPU: PRIME render offload on NVIDIA, `DRI_PRIME=1` on AMD/Intel + AMD. To turn this off, set `MNM_NO_PRIME_OFFLOAD=1`.
 - Terminal only: `python3 mnm-linux-check.py --cli` (supports `--test`, `--watch`, `--fix`, `--appimage PATH`), or run `mnm-linux-check.sh` with bash.
 
 ## Building

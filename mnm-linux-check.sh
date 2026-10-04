@@ -177,7 +177,8 @@ section "4. umu-run (launcher → Proton bridge)"
 # Exec script prepends). If it's running right now, just read its real environment.
 DESKTOP_FILE="" DESKTOP_EXEC=""
 if [ -n "$APPIMAGE" ]; then
-  DESKTOP_FILE=$(grep -lsF -- "$(basename "$APPIMAGE")" "$DATA_HOME"/applications/*.desktop | head -1)
+  # The original entry names the AppImage; the one --fix creates names the launch script
+  DESKTOP_FILE=$(grep -lsF -e "$(basename "$APPIMAGE")" -e "$MNM_HOME/mnm-launcher.sh" "$DATA_HOME"/applications/*.desktop | head -1)
   [ -n "$DESKTOP_FILE" ] && DESKTOP_EXEC=$(sed -n 's/^Exec=//p' "$DESKTOP_FILE" | head -1 | sed 's/ %[a-zA-Z]//g; s/^"\(.*\)"$/\1/')
 fi
 if [ -n "$LAUNCHER_PID" ]; then
@@ -236,6 +237,14 @@ else
   fi
 fi
 
+# Launch scripts written by --fix before v1.1 matched only lowercase ".appimage"
+OLD_LAUNCH=$MNM_HOME/mnm-launcher.sh
+if [ -n "$APPIMAGE" ] && [ -f "$OLD_LAUNCH" ] && grep -qs 'ls -t .*MonstersAndMemories\*\.appimage' "$OLD_LAUNCH" \
+   && ! ls "$(dirname "$APPIMAGE")"/MonstersAndMemories*.appimage >/dev/null 2>&1; then
+  bad "$(tilde "$OLD_LAUNCH") (from an older --fix) only looks for *.appimage, so it can't find $(basename "$APPIMAGE")"
+  fix "$SELF --fix   (rewrites the launch script so it finds .AppImage and .appimage)"
+fi
+
 # ── 5. Proton + runtime + Vulkan ──────────────────────────────────────────────
 section "5. Proton, Steam Runtime, Vulkan"
 if [ "$PROTON" = GE-Proton ]; then
@@ -265,10 +274,53 @@ for gpu in $GPUS; do
   else bad "No Vulkan driver for your $gpu GPU"; fix "$pkg"; fi
 done
 [ -z "$GPUS" ] && info "Couldn't identify the GPU — skipped the Vulkan driver check"
+# AMD's AMDVLK driver next to Mesa's RADV: Proton/DXVK may pick AMDVLK, which breaks many games
+if printf '%s' "$ICDS" | grep -q 'amd_icd'; then
+  warn "AMDVLK is installed alongside Mesa's RADV driver — Proton can pick AMDVLK, which often fails to start or draw games"
+  fix "$(pkg_cmd 'amdvlk lib32-amdvlk' amdvlk amdvlk amdvlk | sed 's/ -S --needed / -R /; s/ install / remove /')   (removes AMDVLK so games use RADV)"
+fi
 if have vulkaninfo; then
   devs=$(timeout 20 vulkaninfo --summary 2>/dev/null | sed -n 's/^\s*deviceName\s*=\s*//p' | grep -v -i llvmpipe | paste -sd, | sed 's/,/, /g')
   if [ -n "$devs" ]; then ok "Vulkan sees: $devs"
   else warn "vulkaninfo found no hardware GPU (only software rendering) — the game will be unplayably slow or won't start"; fi
+fi
+
+# Hybrid-graphics laptops (Optimus): without PRIME offload the game can start on the
+# integrated GPU or hang before drawing anything ("Game is running", no window).
+HYBRID=0 HYBRID_MESA=0
+GPU_COUNT=$(cat /sys/class/drm/card*/device/vendor 2>/dev/null | grep -c .)
+if ls /sys/class/power_supply/BAT* >/dev/null 2>&1; then
+  case " $GPUS " in
+    *" nvidia "*) case " $GPUS " in *" intel "*|*" amd "*) HYBRID=1 ;; esac ;;
+    *) [ "$GPU_COUNT" -ge 2 ] && HYBRID_MESA=1 ;;
+  esac
+fi
+is_offload_wrapper() { grep -qs '__NV_PRIME_RENDER_OFFLOAD' "$1"; }
+is_dri_prime_wrapper() { grep -qs 'DRI_PRIME=1' "$1"; }
+if [ $HYBRID_MESA = 1 ]; then
+  if [ -n "$UMU" ] && is_dri_prime_wrapper "$UMU"; then
+    ok "Laptop with two GPUs — the umu-run wrapper sends the game to the discrete GPU (DRI_PRIME=1)"
+  else
+    pair=$(printf '%s\n' $GPUS | paste -sd/ | tr a-z A-Z); [ "$pair" = AMD ] && pair="AMD + AMD"
+    warn "Laptop with two GPUs ($pair) — the game may run on the slower integrated GPU"
+    fix "$SELF --fix   (installs the umu-run wrapper, which runs the game on the discrete GPU on laptops)"
+  fi
+fi
+if [ $HYBRID = 1 ]; then
+  prime=""; have prime-select && prime=$(prime-select query 2>/dev/null)
+  if [ ! -e /proc/driver/nvidia/version ]; then
+    bad "Laptop with an NVIDIA GPU, but the NVIDIA driver isn't loaded — the game would run on the integrated GPU"
+    fix "Install/enable NVIDIA's proprietary driver (Linux Mint/Ubuntu: Driver Manager, or: sudo ubuntu-drivers install), then reboot"
+  elif [ "$prime" = intel ]; then
+    bad "NVIDIA GPU is switched off (prime-select is set to \"intel\")"
+    fix "sudo prime-select on-demand   (then reboot; or pick \"NVIDIA On-Demand\" in the NVIDIA settings app)"
+  elif [ -n "$UMU" ] && is_offload_wrapper "$UMU"; then
+    ok "Hybrid-graphics laptop — the umu-run wrapper sends the game to the NVIDIA GPU"
+  else
+    other=$(printf '%s\n' $GPUS | grep -v nvidia | paste -sd/)
+    warn "Hybrid-graphics laptop (NVIDIA + ${other^^}) — the game must be told to use the NVIDIA GPU, or it can sit on \"Game is running\" with no window"
+    fix "$SELF --fix   (installs the umu-run wrapper, which runs the game on the NVIDIA GPU on hybrid laptops)"
+  fi
 fi
 
 # ── 6. Wine prefix ────────────────────────────────────────────────────────────
@@ -310,6 +362,32 @@ else
   info "No launcher log yet (the launcher only logs when started via the --fix launch script)"
 fi
 
+# ── 8. Python (umu-run is a Python program; the check window needs PyGObject + GTK) ──
+section "8. Python"
+if have python3; then
+  ok "Python $(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null)"
+  if python3 - <<'PY' 2>/dev/null
+import gi
+for v in ("4.0", "3.0"):
+    try:
+        gi.require_version("Gtk", v)
+        from gi.repository import Gtk
+        break
+    except (ValueError, ImportError):
+        continue
+else:
+    raise SystemExit(1)
+PY
+  then ok "PyGObject + GTK installed (the check window can open)"
+  else
+    warn "PyGObject/GTK not found — the check window (mnm-linux-check.py) falls back to the terminal"
+    fix "$(pkg_cmd 'python-gobject gtk4' 'python3-gobject gtk4' 'python3-gi gir1.2-gtk-4.0' 'python3-gobject-Gdk typelib-1_0-Gtk-4_0')   (only needed for the check window)"
+  fi
+else
+  bad "python3 not found — umu-run (and this check's window) need it"
+  fix "$(pkg_cmd python python3 python3 python3)"
+fi
+
 # ── --fix: env-cleaning wrapper + launch script + menu entry ──────────────────
 # The AppImage exports APPDIR/GTK_*/PYTHON* etc. into everything it spawns, including
 # umu-run (Python) and Proton. Some setups crash with "No module named 'encodings'".
@@ -335,6 +413,16 @@ if [ -n "$APPDIR" ]; then
   export PATH XDG_DATA_DIRS
   unset APPDIR APPIMAGE ARGV0 OWD
 fi
+# Laptops with two GPUs: run the game on the discrete one (set MNM_NO_PRIME_OFFLOAD=1 to skip).
+# NVIDIA Optimus needs PRIME render offload; AMD/Intel + AMD (Mesa) uses DRI_PRIME=1.
+if [ -z "${MNM_NO_PRIME_OFFLOAD:-}" ] && ls /sys/class/power_supply/BAT* >/dev/null 2>&1; then
+  vendors=$(cat /sys/class/drm/card*/device/vendor 2>/dev/null)
+  if [ -e /proc/driver/nvidia/version ] && printf '%s\n' "$vendors" | grep -qvx 0x10de; then
+    export __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only __GLX_VENDOR_LIBRARY_NAME=nvidia
+  elif [ "$(printf '%s\n' "$vendors" | grep -c .)" -ge 2 ] && [ -z "${DRI_PRIME:-}" ]; then
+    export DRI_PRIME=1
+  fi
+fi
 self=$(dirname "$(readlink -f "$0")")
 IFS=: read -ra dirs <<< "$PATH"
 for d in "${dirs[@]}" /usr/bin /usr/local/bin "$HOME/.local/bin"; do
@@ -351,7 +439,7 @@ EOF
 #!/usr/bin/env bash
 # Starts the Monsters & Memories launcher with the umu-run wrapper first in PATH,
 # saving its output to launcher.log (written by mnm-linux-check.sh).
-APP=\$(ls -t "$(dirname "$APPIMAGE")"/MonstersAndMemories*.appimage 2>/dev/null | head -1)
+APP=\$(find "$(dirname "$APPIMAGE")" -maxdepth 1 -iname 'MonstersAndMemories*.appimage' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 export PATH="$WRAP_DIR:\$PATH"
 LOG="$MNM_HOME/launcher.log"
 [ -f "\$LOG" ] && [ "\$(stat -c%s "\$LOG")" -gt 5000000 ] && mv -f "\$LOG" "\$LOG.old"
@@ -419,6 +507,11 @@ find_game() {
     case ${a0,,} in *mnm.exe) [ "$(envof "$p" GAMEID)" = "$GAMEID" ] && { echo "$p"; return; } ;; esac
   done
 }
+started_at() {  # epoch seconds a process started (the /proc/<pid> mtime is only when it was first looked up)
+  local ticks btime
+  ticks=$(awk '{print $22}' "/proc/$1/stat" 2>/dev/null) btime=$(awk '/^btime/{print $2}' /proc/stat)
+  echo $(( btime + ${ticks:-0} / $(getconf CLK_TCK) ))
+}
 if [ $DO_WATCH = 1 ]; then
   section "Watch: launcher → mnm.exe"
   start=$(date +%s); GPID=$(find_game); saw_umu=0
@@ -444,15 +537,17 @@ if [ $DO_WATCH = 1 ]; then
       || warn "Running from a different prefix ($(tilde "$wp")) — the map app looks in $(tilde "$PREFIX")"
     pp=$(envof "$GPID" PROTONPATH); [ -n "$pp" ] && ok "Proton: $(basename "$pp")"
     info "Waiting for the game to write its log…"
+    gstart=$(started_at "$GPID")
     for _ in $(seq 1 45); do
-      [ -f "$PLAYER_LOG" ] && [ "$(stat -c %Y "$PLAYER_LOG")" -ge "$(stat -c %Y "/proc/$GPID")" ] && break
+      [ -f "$PLAYER_LOG" ] && [ "$(stat -c %Y "$PLAYER_LOG")" -ge "$gstart" ] && break
       sleep 2
     done
-    if [ -f "$PLAYER_LOG" ] && [ "$(stat -c %Y "$PLAYER_LOG")" -ge "$(stat -c %Y "/proc/$GPID")" ]; then
+    if [ -f "$PLAYER_LOG" ] && [ "$(stat -c %Y "$PLAYER_LOG")" -ge "$gstart" ]; then
       ok "Game is writing Player.log — the map app can follow your zones"
       LINK_OK=1
     else
       warn "mnm.exe is up but hasn't written Player.log yet ($(tilde "$PLAYER_LOG")) — give it until the login screen and re-run --watch"
+      [ $HYBRID = 1 ] && ! is_offload_wrapper "${UMU:-/nonexistent}" && fix "$SELF --fix   (on hybrid laptops the game can hang like this on the integrated GPU; the wrapper moves it to NVIDIA)"
     fi
   elif [ $saw_umu = 0 ]; then
     bad "No mnm.exe appeared within 10 minutes"
