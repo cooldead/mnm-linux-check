@@ -65,6 +65,14 @@ warn() { printf '  %s!%s %s\n' "$Y" "$N" "$1"; WARNS=$((WARNS+1)); }
 info() { printf '  %s·%s %s\n' "$D" "$N" "$1"; }
 fi
 detail() { sed 's/^/        /'; }               # stdin → indented detail lines under the last item
+# Strip personal data from text that goes into reports: home paths (Linux and Wine
+# drive form), the launcher's login token, e-mail addresses and web tokens (JWTs).
+scrub() {
+  sed -E -e "s#${HOME//#/\\#}#~#g" \
+    -e 's#/home/[^/ ]+#~#g; s#[A-Za-z]:\\home\\[^\\ ]+#~#g' \
+    -e 's/(--token[= ])[^ ]+/\1<hidden>/g; s/(token|password|secret)=[^ &]+/\1=<hidden>/gI' \
+    -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/<email>/g; s/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9._-]+/<hidden>/g'
+}
 fix()  { local f; for f in "${FIXES[@]}"; do [ "$f" = "$1" ] && return; done; FIXES+=("$1"); }
 have() { command -v "$1" >/dev/null 2>&1; }
 tilde() { printf '%s' "${1/#$HOME/\~}"; }
@@ -356,7 +364,7 @@ if [ -f "$LLOG" ]; then
     found=1; bad "Launcher couldn't work out its install folder"; fix "Start the launcher from the .appimage file itself (not an extracted copy)"
   fi
   # What umu-run/Proton/Wine printed after the launcher handed off the game
-  proton_out=$(printf '%s\n' "$last" | sed -n '/Launching via umu-run/,$p' | sed -E 's/(--token[= ])[^ ]+/\1<hidden>/g' \
+  proton_out=$(printf '%s\n' "$last" | sed -n '/Launching via umu-run/,$p' | scrub \
     | grep -vE "^ProtonFixes|^INFO: |atk-bridge|unable to use parent for game drive|Executable is a unix path|^Proton: /|ntsync: up|^\s*$" | tail -15)
   if printf '%s' "$proton_out" | grep -qiE 'err:|error|fail|vulkan|dxvk|vkd3d|exception|crash|segfault|abort'; then
     warn "Proton/Wine reported problems on the last game start ($(date -r "$LLOG" '+%Y-%m-%d %H:%M')):"
@@ -557,7 +565,7 @@ if [ $DO_WATCH = 1 ]; then
     done
   fi
   if [ -n "$GPID" ]; then
-    a0=$(tr '\0' '\n' < "/proc/$GPID/cmdline" | head -1)
+    a0=$(tr '\0' '\n' < "/proc/$GPID/cmdline" | head -1 | scrub)
     ok "mnm.exe is running (pid $GPID, $a0)"
     wp=$(envof "$GPID" STEAM_COMPAT_DATA_PATH); wp=${wp:-$(envof "$GPID" WINEPREFIX)}
     [ "${wp%/}" = "${PREFIX%/}" ] && ok "Started by umu-run in the launcher's prefix" \
@@ -580,23 +588,24 @@ if [ $DO_WATCH = 1 ]; then
       sleep 2
     done
     g=$(game_gpus "$GPID"); [ -n "$g" ] && gpus=$g
-    if [ -z "$gpus" ]; then
-      warn "The game hasn't opened any GPU — it's stuck before starting its renderer"
-    elif [ $HYBRID = 1 ] && ! printf '%s' "$gpus" | grep -q NVIDIA; then
-      bad "Game is using $gpus, not the NVIDIA GPU"
-    elif [ $HYBRID_MESA = 1 ] && ! printf '%s' "$gpus" | grep -q discrete; then
-      warn "Game is using $gpus, not the discrete GPU"
-    else
-      ok "Game is using: $gpus"
-    fi
     if [ -f "$PLAYER_LOG" ] && [ "$(stat -c %Y "$PLAYER_LOG")" -ge "$gstart" ]; then
       ok "Game is writing Player.log — the map app can follow your zones"
       LINK_OK=1
+      # Unity logs the GPU it renders on; Vulkan opens every GPU, so open devices don't tell
+      sleep 3
+      renderer=$(grep -m1 -E '^\s*Renderer:' "$PLAYER_LOG" | sed -E 's/^\s*Renderer:\s*//; s/ \(ID=[^)]*\)//')
+      if [ -z "$renderer" ]; then info "Game hasn't logged its GPU yet"
+      elif [ $HYBRID = 1 ] && ! printf '%s' "$renderer" | grep -qi nvidia; then
+        bad "Game is rendering on $renderer, not the NVIDIA GPU"
+        fix "$SELF --fix   (then start the launcher from its app-menu entry so the game runs on NVIDIA)"
+      else ok "Game is rendering on: $renderer"; fi
     else
       bad "mnm.exe is running but hasn't written Player.log after 90 seconds ($(tilde "$PLAYER_LOG")) — the game is stuck before its first screen"
+      if [ -n "$gpus" ]; then info "GPUs the game has opened so far: $gpus"
+      else info "The game hasn't opened any GPU — it's stuck before starting its renderer"; fi
       if [ -f "$LLOG" ]; then
         tail_out=$(awk '/App data directory:/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$LLOG" | sed -n '/Launching via umu-run/,$p' \
-          | sed -E 's/(--token[= ])[^ ]+/\1<hidden>/g' | grep -vE "^ProtonFixes|^INFO: |atk-bridge|^\s*$" | tail -15)
+          | scrub | grep -vE "^ProtonFixes|^INFO: |atk-bridge|^\s*$" | tail -15)
         [ -n "$tail_out" ] && { info "Proton/Wine output for this start (from $(tilde "$LLOG")):"; printf '%s\n' "$tail_out" | detail; }
       fi
       fix "Press “Copy report” (or copy this output) and post it at https://github.com/cooldead/mnm-linux-check/issues"

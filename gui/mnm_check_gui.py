@@ -7,6 +7,7 @@ without them, or with --cli, it runs the same check in the terminal.
 
     python3 mnm-linux-check.py            open the window
     python3 mnm-linux-check.py --cli ...  terminal check (same options as the .sh: --test, --watch, --fix, --appimage PATH)
+    add --report to print it without personal data (home paths, user/host names, tokens), for bug reports
 """
 import os
 import re
@@ -75,7 +76,15 @@ def gtk_install_hint():
 
 def run_cli(args):
     path = write_script()
+    report = "--report" in args
+    args = [a for a in args if a != "--report"]
     try:
+        if report:
+            # Same check, printed with personal data removed, for pasting into bug reports
+            proc = subprocess.run(["bash", path, *args], env=check_env(False), text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            print(scrub(proc.stdout), end="")
+            return proc.returncode
         return subprocess.call(["bash", path, *args], env=check_env(False))
     except KeyboardInterrupt:
         return 130
@@ -100,6 +109,27 @@ def no_gui_fallback(args, reason):
             subprocess.call(tool)
             break
     return 1
+
+
+# ── personal data never goes into a copied report ───────────────────────────────
+def scrub(text):
+    """Remove home paths, user/host names, tokens, e-mails and download IDs from report text."""
+    import getpass
+    import socket
+    home = os.path.expanduser("~")
+    if home not in ("", "/"):
+        text = text.replace(home, "~")
+    text = re.sub(r"/home/[^/\s]+", "~", text)
+    text = re.sub(r"[A-Za-z]:\\home\\[^\\\s]+", "~", text)
+    text = re.sub(r"(--token[= ])\S+", r"\1<hidden>", text)
+    text = re.sub(r"(?i)\b(token|password|secret)=[^\s&]+", r"\1=<hidden>", text)
+    text = re.sub(r"[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}", "<email>", text)
+    text = re.sub(r"eyJ[\w-]{8,}\.[\w.-]+", "<hidden>", text)
+    text = re.sub(r"(?<![0-9a-fA-F])[0-9a-fA-F]{24,}(?![0-9a-fA-F])", "<id>", text)
+    for name, tag in ((getpass.getuser(), "<user>"), (socket.gethostname(), "<host>")):
+        if name and len(name) >= 3:
+            text = re.sub(rf"(?<![\w-]){re.escape(name)}(?![\w-])", tag, text)
+    return text
 
 
 # ── fix text → prose + copyable command ─────────────────────────────────────────
@@ -315,7 +345,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 ("appimage", "Choose AppImage…", "Point the check at your MonstersAndMemories .appimage "
                                                  "if it isn't in ~/Applications, ~/Downloads or similar."),
                 ("report", "Copy report", "Copy the full result as text, to paste into a bug report or Discord. "
-                                          "It never includes your login token."),
+                                          "Personal data (login token, user and computer name, home folder path) is left out."),
             ):
                 btn = Gtk.Button(label=text)
                 btn.set_tooltip_text(tip)
@@ -540,7 +570,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 lines.append("\nWhat to do:")
                 lines += [f"  {i}. {fix}" for i, fix in enumerate(self.fixes, 1)]
             lines.append("\nResult: " + self.banner_text.get_text().replace("\n", " "))
-            copy_text("\n".join(lines))
+            copy_text(scrub("\n".join(lines)))
             button.set_label("Copied!")
             GLib.timeout_add(1500, lambda: button.set_label("Copy report") or False)
 

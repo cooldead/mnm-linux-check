@@ -23,9 +23,9 @@ It never installs or changes anything by itself. The only button that writes fil
 | --- | --- |
 | Check again | Re-runs every check. Read-only. |
 | Test Proton | Runs a harmless Windows command through `umu-run` in the game's prefix, without starting the game. The first run may download GE-Proton (about 500 MB). |
-| Watch for Play | Waits up to 10 minutes for you to press Play, then confirms the game really started, shows which GPU it's using, and, if it hangs, shows what Proton printed. |
+| Watch for Play | Waits up to 10 minutes for you to press Play, then confirms the game really started, shows which GPU it renders on, and, if it hangs, shows what Proton printed. |
 | Apply launcher fix… | Installs a small `umu-run` wrapper and launch script that stop the AppImage's environment from crashing `umu-run` (the "nothing happens" bug). Writes only to your home folder. |
-| Copy report | Copies the whole result as text, to paste into a [bug report](../../issues/new/choose) or Discord. It never includes your login token. |
+| Copy report | Copies the whole result as text, to paste into a [bug report](../../issues/new/choose) or Discord. Personal data is left out (see below). |
 | Choose AppImage… | Use this if your launcher AppImage isn't in `~/Applications`, `~/Downloads` or a similar folder. |
 
 ## What it checks
@@ -54,6 +54,9 @@ Python 3 (`umu-run` needs it too) plus PyGObject with GTK 4 or 3 for the window.
 
 On laptops with an integrated plus a discrete GPU, the game can start on the slow integrated GPU, or sit on "Game is running" with no window (NVIDIA Optimus). The check detects this, and **Apply launcher fix…** makes the game use the discrete GPU: PRIME render offload on NVIDIA, `DRI_PRIME=1` on AMD/Intel + AMD. To turn this off, set `MNM_NO_PRIME_OFFLOAD=1`.
 - Terminal only: `python3 mnm-linux-check.py --cli` (supports `--test`, `--watch`, `--fix`, `--appimage PATH`), or run `mnm-linux-check.sh` with bash.
+- For a bug report from the terminal: `python3 mnm-linux-check.py --cli --watch --report` prints the result without personal data.
+
+Reports never include your login token, user name, computer name, home folder path, e-mail addresses or download IDs. **Copy report** and `--report` strip them out.
 
 ## Building
 
