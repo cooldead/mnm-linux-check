@@ -56,7 +56,16 @@ On laptops with an integrated plus a discrete GPU, the game can start on the slo
 - Terminal only: `python3 mnm-linux-check.py --cli` (supports `--test`, `--watch`, `--fix`, `--appimage PATH`), or run `mnm-linux-check.sh` with bash.
 - For a bug report from the terminal: `python3 mnm-linux-check.py --cli --watch --report` prints the result without personal data.
 
-Reports never include your login token, user name, computer name, home folder path, e-mail addresses or download IDs. **Copy report** and `--report` strip them out.
+### Privacy
+
+The check never shows personal data. Paths in your home folder appear as `~/…`, and anything it copies out of logs or tools (Proton/Wine output, error messages) has these removed:
+
+- your user name and computer name
+- home folders (`/home/…`, `/var/home/…`, Wine's `Z:\home\…` and `C:\users\…`), and your name in `/run/media/…`
+- the launcher's login token, and any `token=`, `password=`, `secret=` or `auth=` values or web tokens
+- e-mail addresses, IP and MAC addresses, and machine or download IDs
+
+**Copy report** and `--report` run the whole report through the same filter again before you share it. A report keeps what's useful for fixing problems: your distro, GPU models, and driver, Proton and umu versions.
 
 ## Building
 

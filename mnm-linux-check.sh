@@ -20,8 +20,10 @@
 #
 # MNM_CHECK_GUI=1 switches output to tab-separated "@@kind\ttext" records for the GUI.
 #
-# Read-only unless --fix is given. Never prints the launcher's login token (it's on
-# mnm.exe's command line) — only argv[0] of game processes is ever shown.
+# Read-only unless --fix is given. Output never contains personal data: paths under
+# your home folder are shown as ~/…, and anything copied from logs or tools goes
+# through scrub() (user/computer name, login token, e-mail, IP/MAC addresses, IDs).
+# Only argv[0] of game processes is read — the login token is on mnm.exe's command line.
 
 SELF=${MNM_CHECK_SELF:-bash $0}                # how to re-run this check, for the fix list
 GUI=${MNM_CHECK_GUI:-0}
@@ -65,17 +67,38 @@ warn() { printf '  %s!%s %s\n' "$Y" "$N" "$1"; WARNS=$((WARNS+1)); }
 info() { printf '  %s·%s %s\n' "$D" "$N" "$1"; }
 fi
 detail() { sed 's/^/        /'; }               # stdin → indented detail lines under the last item
-# Strip personal data from text that goes into reports: home paths (Linux and Wine
-# drive form), the launcher's login token, e-mail addresses and web tokens (JWTs).
+# scrub: remove personal data from text copied out of logs/tools (keep in step with
+# scrub() in gui/mnm_check_gui.py): home folders in Linux and Wine form, removable-media
+# user folders, user and computer name, login/web tokens, e-mail, IP/MAC addresses, UUIDs.
+COMMON_NAMES=" amd deck game games gamer intel linux mnm nvidia root steam user "
 scrub() {
-  sed -E -e "s#${HOME//#/\\#}#~#g" \
-    -e 's#/home/[^/ ]+#~#g; s#[A-Za-z]:\\home\\[^\\ ]+#~#g' \
-    -e 's/(--token[= ])[^ ]+/\1<hidden>/g; s/(token|password|secret)=[^ &]+/\1=<hidden>/gI' \
-    -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/<email>/g; s/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9._-]+/<hidden>/g'
+  local user=${USER:-$(id -un 2>/dev/null)} host=${HOSTNAME:-$(uname -n 2>/dev/null)} names="" n
+  for n in "$user" "$host"; do   # whole-word only, and never short or common words like "amd"
+    [ ${#n} -ge 3 ] && [[ $COMMON_NAMES != *" ${n,,} "* ]] && names="$names|${n//./\\.}"
+  done
+  sed -E \
+    -e 's#(/var)?/home/[^/[:space:]]+#~#g; s#/(run/media|media)/[^/[:space:]]+#/\1/<user>#g' \
+    -e 's#[A-Za-z]:\\(users|home)\\[^\\[:space:]]+#~#gI' \
+    -e 's/(--token[= ])[^[:space:]]+/\1<hidden>/g; s/(token|password|secret|auth)=[^[:space:]&]+/\1=<hidden>/gI' \
+    -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/<email>/g; s/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9._-]+/<hidden>/g' \
+    -e 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/<id>/g' \
+    -e 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{24,}([^0-9a-fA-F]|$)/\1<id>\2/g' \
+    -e 's/([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}/<mac>/g; s/(^|[^0-9.])((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])([^0-9.]|$)/\1<ip>\5/g' \
+    ${HOME:+-e "s#${HOME//./\\.}#~#g"} \
+    ${names:+-e "s/(^|[^[:alnum:]_-])(${names#|})([^[:alnum:]_-]|$)/\\1<name>\\3/g"}
 }
 fix()  { local f; for f in "${FIXES[@]}"; do [ "$f" = "$1" ] && return; done; FIXES+=("$1"); }
 have() { command -v "$1" >/dev/null 2>&1; }
-tilde() { printf '%s' "${1/#$HOME/\~}"; }
+tilde() { printf '%s' "${1/#$HOME/\~}"; }        # path for display: /home/you/x → ~/x
+shpath() {                                      # path for a copyable command, quoted, without the user name
+  case $1 in "$HOME"/*) printf '~/%q' "${1#"$HOME"/}" ;; *) printf '%q' "$1" ;; esac
+}
+last_session() { awk '/App data directory:/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$1"; }
+# Proton/Wine lines from a launcher-log session, minus routine noise, scrubbed
+proton_lines() {
+  sed -n '/Launching via umu-run/,$p' | scrub \
+    | grep -vE "^ProtonFixes|^INFO: |atk-bridge|unable to use parent for game drive|Executable is a unix path|^Proton: [~/]|ntsync: up|^[[:space:]]*$" | tail -15
+}
 
 # ── distro + GPU, so the fix commands are the right ones for this machine ─────
 OS_ID= OS_LIKE= OS_NAME=Linux
@@ -138,14 +161,14 @@ if [ -z "$APPIMAGE" ]; then  # newest MonstersAndMemories*.appimage in the usual
 fi
 
 if [ -z "$APPIMAGE" ] || [ ! -f "$APPIMAGE" ]; then
-  bad "Launcher AppImage not found${APPIMAGE:+ at $APPIMAGE}"
+  bad "Launcher AppImage not found${APPIMAGE:+ at $(tilde "$APPIMAGE")}"
   fix "Download the Linux launcher (MonstersAndMemories_*.appimage) from the official Monsters & Memories site into ~/Applications, then re-run this check (or pass --appimage /path/to/it)"
   APPIMAGE=""
 else
   ok "Found $(tilde "$APPIMAGE")"
   [ -n "$LAUNCHER_PID" ] && info "Launcher is running (pid $LAUNCHER_PID)"
   if [ -x "$APPIMAGE" ]; then ok "AppImage is executable"
-  else bad "AppImage isn't marked executable"; fix "chmod +x '$APPIMAGE'"; fi
+  else bad "AppImage isn't marked executable"; fix "chmod +x $(shpath "$APPIMAGE")"; fi
 fi
 
 # AppImages mount themselves with FUSE 2 (libfuse.so.2), which many distros no longer ship by default
@@ -220,7 +243,8 @@ is_wrapper() { grep -qs 'unset PYTHONHOME' "$1" 2>/dev/null && grep -qs 'umu-run
 if [ -z "$UMU" ]; then
   if have umu-run; then
     bad "umu-run is installed ($(tilde "$(command -v umu-run)")) but NOT on the PATH of $PATH_SRC — the launcher can't see it"
-    fix "Make the desktop session see it: mkdir -p ~/.config/environment.d && echo 'PATH=$(dirname "$(command -v umu-run)"):\${PATH}' >> ~/.config/environment.d/mnm.conf   then log out and back in"
+    udir=$(dirname "$(command -v umu-run)"); udir=${udir/#$HOME/\$\{HOME\}}
+    fix "Make the desktop session see it: mkdir -p ~/.config/environment.d && echo 'PATH=$udir:\${PATH}' >> ~/.config/environment.d/mnm.conf   then log out and back in"
   else
     bad "umu-run not installed — the launcher says \"umu-launcher not found\" and Play does nothing"
     fix "$UMU_INSTALL"
@@ -241,7 +265,7 @@ else
     ok "umu-run works: $(printf '%s' "$v" | grep -io 'umu-launcher version [0-9.]*' | head -1)"
   else
     bad "umu-run is on PATH but fails to run:"
-    printf '%s\n' "$v" | tail -4 | sed 's/^/        /'
+    printf '%s\n' "$v" | scrub | tail -4 | detail
     fix "Reinstall umu-launcher: $UMU_INSTALL"
   fi
 fi
@@ -261,7 +285,7 @@ if [ "$PROTON" = GE-Proton ]; then
   if [ -n "$ge" ]; then ok "GE-Proton downloaded ($(basename "$ge"))"
   else info "GE-Proton not downloaded yet — umu-run fetches it (~500 MB) on the first Play; the first start can take several minutes"; fi
 elif [ -d "$PROTON" ]; then ok "Using custom Proton from MNM_PROTONPATH ($(tilde "$PROTON"))"
-else bad "MNM_PROTONPATH=$PROTON is not a directory"; fix "Unset MNM_PROTONPATH, or point it at an unpacked Proton folder"; fi
+else bad "MNM_PROTONPATH=$(tilde "$PROTON") is not a directory"; fix "Unset MNM_PROTONPATH, or point it at an unpacked Proton folder"; fi
 
 if ls -d "$DATA_HOME"/umu/steamrt* >/dev/null 2>&1; then ok "Steam Linux Runtime present ($(ls -d "$DATA_HOME"/umu/steamrt* | xargs -n1 basename | tr '\n' ' '))"
 else info "Steam Linux Runtime not downloaded yet — umu-run fetches it on the first Play"; fi
@@ -348,7 +372,7 @@ fi
 section "7. Launcher log"
 LLOG=$MNM_HOME/launcher.log
 if [ -f "$LLOG" ]; then
-  last=$(awk '/App data directory:/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$LLOG")
+  last=$(last_session "$LLOG")
   found=0
   if printf '%s' "$last" | grep -q 'umu-launcher not found'; then
     found=1; bad "Launcher reported \"umu-launcher not found\" on its last run"; fix "$UMU_INSTALL"
@@ -358,14 +382,13 @@ if [ -f "$LLOG" ]; then
     fix "$SELF --fix   (installs a wrapper that strips the AppImage's environment before umu-run)"
   fi
   if printf '%s' "$last" | grep -q 'Failed to start game via umu-run'; then
-    found=1; bad "Launcher: $(printf '%s' "$last" | grep -m1 'Failed to start game via umu-run' | cut -c1-160)"
+    found=1; bad "Launcher: $(printf '%s' "$last" | grep -m1 'Failed to start game via umu-run' | scrub | cut -c1-160)"
   fi
   if printf '%s' "$last" | grep -q 'Failed to resolve launcher install directory'; then
     found=1; bad "Launcher couldn't work out its install folder"; fix "Start the launcher from the .appimage file itself (not an extracted copy)"
   fi
   # What umu-run/Proton/Wine printed after the launcher handed off the game
-  proton_out=$(printf '%s\n' "$last" | sed -n '/Launching via umu-run/,$p' | scrub \
-    | grep -vE "^ProtonFixes|^INFO: |atk-bridge|unable to use parent for game drive|Executable is a unix path|^Proton: /|ntsync: up|^\s*$" | tail -15)
+  proton_out=$(printf '%s\n' "$last" | proton_lines)
   if printf '%s' "$proton_out" | grep -qiE 'err:|error|fail|vulkan|dxvk|vkd3d|exception|crash|segfault|abort'; then
     warn "Proton/Wine reported problems on the last game start ($(date -r "$LLOG" '+%Y-%m-%d %H:%M')):"
     printf '%s\n' "$proton_out" | detail
@@ -506,7 +529,7 @@ if [ $DO_TEST = 1 ]; then
       LINK_OK=1
     else
       bad "umu-run couldn't run a Windows program in the game prefix. Last output:"
-      grep -v -E 'ProtonFixes|^\s*$' "$tlog" | tail -8 | sed 's/^/        /'
+      grep -v -E 'ProtonFixes|^[[:space:]]*$' "$tlog" | scrub | tail -8 | detail
       fix "Check the output above; common causes are no network on first run (GE-Proton download) or a missing Vulkan driver"
     fi
     rm -f "$tlog"
@@ -604,11 +627,11 @@ if [ $DO_WATCH = 1 ]; then
       if [ -n "$gpus" ]; then info "GPUs the game has opened so far: $gpus"
       else info "The game hasn't opened any GPU — it's stuck before starting its renderer"; fi
       if [ -f "$LLOG" ]; then
-        tail_out=$(awk '/App data directory:/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$LLOG" | sed -n '/Launching via umu-run/,$p' \
-          | scrub | grep -vE "^ProtonFixes|^INFO: |atk-bridge|^\s*$" | tail -15)
+        tail_out=$(last_session "$LLOG" | proton_lines)
         [ -n "$tail_out" ] && { info "Proton/Wine output for this start (from $(tilde "$LLOG")):"; printf '%s\n' "$tail_out" | detail; }
       fi
-      fix "Press “Copy report” (or copy this output) and post it at https://github.com/cooldead/mnm-linux-check/issues"
+      if [ "$GUI" = 1 ]; then fix "Press “Copy report” and post it at https://github.com/cooldead/mnm-linux-check/issues"
+      else fix "Post this output at https://github.com/cooldead/mnm-linux-check/issues (it contains no personal data)"; fi
       [ $HYBRID = 1 ] && ! is_offload_wrapper "${UMU:-/nonexistent}" && fix "$SELF --fix   (on hybrid laptops the game can hang like this on the integrated GPU; the wrapper moves it to NVIDIA)"
     fi
   elif [ $saw_umu = 0 ]; then

@@ -9,11 +9,13 @@ without them, or with --cli, it runs the same check in the terminal.
     python3 mnm-linux-check.py --cli ...  terminal check (same options as the .sh: --test, --watch, --fix, --appimage PATH)
     add --report to print it without personal data (home paths, user/host names, tokens), for bug reports
 """
+import getpass
 import os
 import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -112,23 +114,35 @@ def no_gui_fallback(args, reason):
 
 
 # ── personal data never goes into a copied report ───────────────────────────────
+# Keep in step with scrub() in mnm-linux-check.sh.
+COMMON_NAMES = {"amd", "deck", "game", "games", "gamer", "intel", "linux", "mnm", "nvidia", "root", "steam", "user"}
+OCTET = r"(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+SCRUB_RULES = [
+    (r"(?:/var)?/home/[^/\s]+", "~"),
+    (r"/(run/media|media)/[^/\s]+", r"/\1/<user>"),
+    (r"(?i)[A-Za-z]:\\(?:users|home)\\[^\\\s]+", "~"),
+    (r"(--token[= ])\S+", r"\1<hidden>"),
+    (r"(?i)\b(token|password|secret|auth)=[^\s&]+", r"\1=<hidden>"),
+    (r"[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}", "<email>"),
+    (r"eyJ[\w-]{8,}\.[\w.-]+", "<hidden>"),
+    (r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "<id>"),
+    (r"(?<![0-9a-fA-F])[0-9a-fA-F]{24,}(?![0-9a-fA-F])", "<id>"),
+    (r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", "<mac>"),
+    (rf"(?<![\d.])(?:{OCTET}\.){{3}}{OCTET}(?![\d.])", "<ip>"),
+]
+
+
 def scrub(text):
-    """Remove home paths, user/host names, tokens, e-mails and download IDs from report text."""
-    import getpass
-    import socket
-    home = os.path.expanduser("~")
+    """Remove personal data from report text: home folders, user and computer name,
+    login/web tokens, e-mail, IP/MAC addresses and IDs."""
+    for pattern, repl in SCRUB_RULES:
+        text = re.sub(pattern, repl, text)
+    home = os.path.expanduser("~")   # home folders outside /home (after the rules, so /var/home stays whole)
     if home not in ("", "/"):
         text = text.replace(home, "~")
-    text = re.sub(r"/home/[^/\s]+", "~", text)
-    text = re.sub(r"[A-Za-z]:\\home\\[^\\\s]+", "~", text)
-    text = re.sub(r"(--token[= ])\S+", r"\1<hidden>", text)
-    text = re.sub(r"(?i)\b(token|password|secret)=[^\s&]+", r"\1=<hidden>", text)
-    text = re.sub(r"[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}", "<email>", text)
-    text = re.sub(r"eyJ[\w-]{8,}\.[\w.-]+", "<hidden>", text)
-    text = re.sub(r"(?<![0-9a-fA-F])[0-9a-fA-F]{24,}(?![0-9a-fA-F])", "<id>", text)
-    for name, tag in ((getpass.getuser(), "<user>"), (socket.gethostname(), "<host>")):
-        if name and len(name) >= 3:
-            text = re.sub(rf"(?<![\w-]){re.escape(name)}(?![\w-])", tag, text)
+    for name in (getpass.getuser(), socket.gethostname()):
+        if name and len(name) >= 3 and name.lower() not in COMMON_NAMES:
+            text = re.sub(rf"(?<![\w-]){re.escape(name)}(?![\w-])", "<name>", text)
     return text
 
 
