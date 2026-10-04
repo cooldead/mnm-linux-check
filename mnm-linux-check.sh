@@ -82,16 +82,19 @@ scrub() {
     -e 's/(--token[= ])[^[:space:]]+/\1<hidden>/g; s/(token|password|secret|auth)=[^[:space:]&]+/\1=<hidden>/gI' \
     -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/<email>/g; s/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9._-]+/<hidden>/g' \
     -e 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/<id>/g' \
-    -e 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{24,}([^0-9a-fA-F]|$)/\1<id>\2/g' \
     -e 's/([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}/<mac>/g; s/(^|[^0-9.])((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])([^0-9.]|$)/\1<ip>\5/g' \
     ${HOME:+-e "s#${HOME//./\\.}#~#g"} \
-    ${names:+-e "s/(^|[^[:alnum:]_-])(${names#|})([^[:alnum:]_-]|$)/\\1<name>\\3/g"}
+    ${names:+-e "s/(^|[^[:alnum:]_-])(${names#|})([^[:alnum:]_-]|$)/\\1<name>\\3/g"} \
+    | mask_ids
 }
 fix()  { local f; for f in "${FIXES[@]}"; do [ "$f" = "$1" ] && return; done; FIXES+=("$1"); }
 have() { command -v "$1" >/dev/null 2>&1; }
-tilde() { printf '%s' "${1/#$HOME/\~}"; }        # path for display: /home/you/x → ~/x
-shpath() {                                      # path for a copyable command, quoted, without the user name
-  case $1 in "$HOME"/*) printf '~/%q' "${1#"$HOME"/}" ;; *) printf '%q' "$1" ;; esac
+# Download/menu-entry file names carry long hex IDs (MonstersAndMemories_amd64_5bc8…appimage)
+mask_ids() { sed -E 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{24,}([^0-9a-fA-F]|$)/\1<id>\2/g'; }
+tilde() { printf '%s' "${1/#$HOME/\~}" | mask_ids; }   # path for display: /home/you/x_<hex> → ~/x_<id>
+shpath() {                                      # path for a copyable command: no user name, ID as a * wildcard
+  case $1 in "$HOME"/*) printf '~/%q' "${1#"$HOME"/}" ;; *) printf '%q' "$1" ;; esac \
+    | sed -E 's/(^|[^0-9a-fA-F])[0-9a-fA-F]{24,}([^0-9a-fA-F]|$)/\1*\2/g'
 }
 last_session() { awk '/App data directory:/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$1"; }
 # Proton/Wine lines from a launcher-log session, minus routine noise, scrubbed
@@ -274,7 +277,7 @@ fi
 OLD_LAUNCH=$MNM_HOME/mnm-launcher.sh
 if [ -n "$APPIMAGE" ] && [ -f "$OLD_LAUNCH" ] && grep -qs 'ls -t .*MonstersAndMemories\*\.appimage' "$OLD_LAUNCH" \
    && ! ls "$(dirname "$APPIMAGE")"/MonstersAndMemories*.appimage >/dev/null 2>&1; then
-  bad "$(tilde "$OLD_LAUNCH") (from an older --fix) only looks for *.appimage, so it can't find $(basename "$APPIMAGE")"
+  bad "$(tilde "$OLD_LAUNCH") (from an older --fix) only looks for *.appimage, so it can't find $(basename "$(tilde "$APPIMAGE")")"
   fix "$SELF --fix   (rewrites the launch script so it finds .AppImage and .appimage)"
 fi
 

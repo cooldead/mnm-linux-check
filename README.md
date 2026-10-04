@@ -43,6 +43,9 @@ It never installs or changes anything by itself. The only button that writes fil
 
 Python 3 (`umu-run` needs it too) plus PyGObject with GTK 4 or 3 for the window. GNOME, Ubuntu, Linux Mint, Fedora, Bazzite and SteamOS usually have these already. If they're missing, the check shows the command for your distro, and the window falls back to the terminal check.
 
+- Terminal only: `python3 mnm-linux-check.py --cli` (supports `--test`, `--watch`, `--fix`, `--appimage PATH`), or run `mnm-linux-check.sh` with bash.
+- For a bug report from the terminal: `python3 mnm-linux-check.py --cli --watch --report` prints the result without personal data.
+
 | Distro | Install command |
 | --- | --- |
 | Arch, CachyOS, Manjaro, EndeavourOS | `sudo pacman -S --needed python python-gobject gtk4` |
@@ -53,12 +56,10 @@ Python 3 (`umu-run` needs it too) plus PyGObject with GTK 4 or 3 for the window.
 ### Laptops with two GPUs
 
 On laptops with an integrated plus a discrete GPU, the game can start on the slow integrated GPU, or sit on "Game is running" with no window (NVIDIA Optimus). The check detects this, and **Apply launcher fix…** makes the game use the discrete GPU: PRIME render offload on NVIDIA, `DRI_PRIME=1` on AMD/Intel + AMD. To turn this off, set `MNM_NO_PRIME_OFFLOAD=1`.
-- Terminal only: `python3 mnm-linux-check.py --cli` (supports `--test`, `--watch`, `--fix`, `--appimage PATH`), or run `mnm-linux-check.sh` with bash.
-- For a bug report from the terminal: `python3 mnm-linux-check.py --cli --watch --report` prints the result without personal data.
 
 ### Privacy
 
-The check never shows personal data. Paths in your home folder appear as `~/…`, and anything it copies out of logs or tools (Proton/Wine output, error messages) has these removed:
+The check never shows personal data. Paths in your home folder appear as `~/…`, download IDs in file names as `<id>`, and anything it copies out of logs or tools (Proton/Wine output, error messages) has these removed:
 
 - your user name and computer name
 - home folders (`/home/…`, `/var/home/…`, Wine's `Z:\home\…` and `C:\users\…`), and your name in `/run/media/…`
