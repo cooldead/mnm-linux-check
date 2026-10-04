@@ -120,7 +120,8 @@ IMMUTABLE=0
 GPUS=""                                        # vendor ids from sysfs — no lspci needed
 for v in /sys/class/drm/card*/device/vendor; do
   [ -r "$v" ] || continue
-  case $(cat "$v") in 0x10de) GPUS="$GPUS nvidia" ;; 0x1002) GPUS="$GPUS amd" ;; 0x8086) GPUS="$GPUS intel" ;; esac
+  case $(cat "$v") in 0x10de) GPUS="$GPUS nvidia" ;; 0x1002) GPUS="$GPUS amd" ;; 0x8086) GPUS="$GPUS intel" ;;
+    0x1af4|0x1234|0x15ad|0x80ee|0x1414) GPUS="$GPUS virtual" ;; esac   # virtio, QEMU, VMware, VirtualBox, Hyper-V
 done
 GPUS=$(printf '%s\n' $GPUS | sort -u | tr '\n' ' ')
 
@@ -134,13 +135,34 @@ pkg_cmd() {  # pkg_cmd <arch pkgs> <fedora pkgs> <debian pkgs> <suse pkgs>
   esac
 }
 
-UMU_INSTALL=$(case $FAMILY in
-  arch)   echo "sudo pacman -S --needed umu-launcher" ;;
-  fedora) echo "sudo dnf install umu-launcher" ;;
-  debian) echo "download the umu-launcher .deb for your release from https://github.com/Open-Wine-Components/umu-launcher/releases and run: sudo apt install ./umu-launcher*.deb" ;;
-  *)      echo "pipx install umu-launcher   (then make sure ~/.local/bin is on your PATH)" ;;
-esac)
-[ $IMMUTABLE = 1 ] && UMU_INSTALL="pipx install umu-launcher   (image-based distro — or use your distro's documented way to add umu-launcher)"
+# umu-launcher isn't on PyPI. Arch and Fedora package it; Debian/Ubuntu/Mint get the two
+# .deb files from its GitHub release (the right pair for the release and CPU); everything
+# else (and image-based distros) gets the single-file zipapp in ~/.local/bin.
+UMU_RELEASES=https://github.com/Open-Wine-Components/umu-launcher/releases
+UMU_WHAT="Install umu-launcher (the tool the M&M launcher uses to start the game)"
+umu_version() {
+  curl -fsS -m 5 https://api.github.com/repos/Open-Wine-Components/umu-launcher/releases/latest 2>/dev/null \
+    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1 | grep . || echo 1.4.4
+}
+umu_install() {
+  local v dist="" arch base deb1 deb2
+  if [ $IMMUTABLE = 0 ]; then
+    case $FAMILY in
+      arch)   echo "$UMU_WHAT: sudo pacman -S --needed umu-launcher"; return ;;
+      fedora) echo "$UMU_WHAT: sudo dnf install umu-launcher"; return ;;
+    esac
+    case ${UBUNTU_CODENAME:-} in noble|resolute) dist=ubuntu-$UBUNTU_CODENAME ;; esac
+    [ -z "$dist" ] && case ${DEBIAN_CODENAME:-${VERSION_CODENAME:-}} in bookworm) dist=debian-12 ;; trixie) dist=debian-13 ;; esac
+  fi
+  v=$(umu_version) base=$UMU_RELEASES/download/$v
+  if [ -n "$dist" ]; then
+    arch=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+    deb1=python3-umu-launcher_$v-1_${arch}_$dist.deb deb2=umu-launcher_$v-1_all_$dist.deb
+    echo "$UMU_WHAT: cd /tmp && wget -q $base/$deb1 $base/$deb2 && sudo apt install ./$deb1 ./$deb2   (downloads the two umu-launcher packages for your system and installs them; it ends with a summary when it worked)"
+  else
+    echo "$UMU_WHAT: mkdir -p ~/.local/bin && cd /tmp && curl -fsSLO $base/umu-launcher-$v-zipapp.tar && tar xf umu-launcher-$v-zipapp.tar && install -m 755 umu/umu-run ~/.local/bin/umu-run   (installs umu-run for your user, no sudo needed; it prints nothing when it worked)"
+  fi
+}
 
 if [ "$GUI" = 1 ]; then printf '@@system\t%s\t%s\n' "$OS_NAME" "${GPUS:-unknown}"
 else printf '%sMonsters & Memories — Linux launcher check%s  %s(%s; GPU:%s)%s\n' "$B" "$N" "$D" "$OS_NAME" "${GPUS:- unknown}" "$N"; fi
@@ -165,13 +187,13 @@ fi
 
 if [ -z "$APPIMAGE" ] || [ ! -f "$APPIMAGE" ]; then
   bad "Launcher AppImage not found${APPIMAGE:+ at $(tilde "$APPIMAGE")}"
-  fix "Download the Linux launcher (MonstersAndMemories_*.appimage) from the official Monsters & Memories site into ~/Applications, then re-run this check (or pass --appimage /path/to/it)"
+  fix "Download the launcher from the official Monsters & Memories site (Download Launcher page): pick “Linux x86_64 (Launcher only)”, not aarch64 (that one is for ARM computers). Save it in ~/Applications or ~/Games, then re-run this check (or pass --appimage /path/to/it)"
   APPIMAGE=""
 else
   ok "Found $(tilde "$APPIMAGE")"
   [ -n "$LAUNCHER_PID" ] && info "Launcher is running (pid $LAUNCHER_PID)"
   if [ -x "$APPIMAGE" ]; then ok "AppImage is executable"
-  else bad "AppImage isn't marked executable"; fix "chmod +x $(shpath "$APPIMAGE")"; fi
+  else bad "AppImage isn't marked executable"; fix "Make the AppImage runnable: chmod +x $(shpath "$APPIMAGE")   (it prints nothing when it worked)"; fi
 fi
 
 # AppImages mount themselves with FUSE 2 (libfuse.so.2), which many distros no longer ship by default
@@ -194,7 +216,7 @@ if [ -z "$GAME_DIR" ]; then
   info "Skipped — need the AppImage location first"
 elif [ ! -f "$GAME_DIR/mnm.exe" ]; then
   bad "mnm.exe not found in $(tilde "$GAME_DIR")"
-  fix "Open the launcher, log in and click Install — it downloads the game into $(tilde "$GAME_DIR") (keep the AppImage where it is)"
+  fix "Open the launcher, log in and click Install — it downloads the game (about 7 GB) into $(tilde "$GAME_DIR"). Keep the AppImage where it is"
 else
   if [ "$(head -c2 "$GAME_DIR/mnm.exe")" = MZ ]; then ok "mnm.exe present ($(tilde "$GAME_DIR"))"
   else bad "mnm.exe exists but isn't a Windows program (corrupt download?)"; fix "In the launcher, use Verify/Repair (or delete $(tilde "$GAME_DIR") and reinstall)"; fi
@@ -250,7 +272,7 @@ if [ -z "$UMU" ]; then
     fix "Make the desktop session see it: mkdir -p ~/.config/environment.d && echo 'PATH=$udir:\${PATH}' >> ~/.config/environment.d/mnm.conf   then log out and back in"
   else
     bad "umu-run not installed — the launcher says \"umu-launcher not found\" and Play does nothing"
-    fix "$UMU_INSTALL"
+    fix "$(umu_install)"
   fi
 else
   ok "Launcher will use $(tilde "$UMU")  ${D}(PATH from $PATH_SRC)${N}"
@@ -260,7 +282,7 @@ else
     REAL=""; for u in "${UMU_ALL[@]:1}"; do is_wrapper "$u" || { REAL=$u; break; }; done
     [ -z "$REAL" ] && REAL=$(sed -n 's/^exec \([^ ]*umu-run\).*/\1/p' "$UMU" | head -1)
     if [ -z "$REAL" ] || [ ! -x "$REAL" ]; then
-      bad "…but the wrapper can't find a real umu-run behind it"; fix "$UMU_INSTALL"
+      bad "…but the wrapper can't find a real umu-run behind it"; fix "$(umu_install)"
     fi
   fi
   # umu-run is Python — a broken Python install or a half-installed pipx copy fails here
@@ -269,8 +291,26 @@ else
   else
     bad "umu-run is on PATH but fails to run:"
     printf '%s\n' "$v" | scrub | tail -4 | detail
-    fix "Reinstall umu-launcher: $UMU_INSTALL"
+    fix "$(umu_install | sed 's/^Install /Reinstall /')"
   fi
+fi
+
+# The official AppImage passes its own Python settings (PYTHONHOME…) to everything it starts,
+# so a plain umu-run crashes at once ("No module named 'encodings'") and Play does nothing.
+# Seen on CachyOS and on a fresh Linux Mint 22.3; the --fix wrapper strips those settings.
+CRASH_SEEN=0
+grep -qs "No module named 'encodings'" "$HOME/.xsession-errors" "$MNM_HOME/launcher.log" && CRASH_SEEN=1
+WRAPPER_INSTALLED=0; is_wrapper "$WRAP_DIR/umu-run" && WRAPPER_INSTALLED=1
+if [ -z "$UMU" ] || ! is_wrapper "$UMU"; then   # also when umu-run is still missing: the list shows every step up front
+  if [ $WRAPPER_INSTALLED = 1 ] && [ -n "$LAUNCHER_PID" ]; then
+    bad "The launcher is running WITHOUT the launcher fix, so Play does nothing — it was started from the AppImage file or an old shortcut"
+    fix "Close the launcher, then start “Monsters & Memories” from your app menu (that entry uses the fix). Don't open the AppImage file directly"
+  elif [ $WRAPPER_INSTALLED = 0 ]; then
+    bad "Launcher fix not applied — the launcher passes its own Python settings to umu-run, which then crashes the moment you press Play (nothing happens)$([ $CRASH_SEEN = 1 ] && echo '. This crash is in your session log')"
+    fix "$SELF --fix   (required: installs a small umu-run wrapper that removes the AppImage's settings, and an app-menu entry “Monsters & Memories” to start the launcher with it)"
+  fi
+elif [ $WRAPPER_INSTALLED = 1 ] && [ -z "$LAUNCHER_PID" ]; then
+  info "Start the launcher from your app menu: “Monsters & Memories” (that entry uses the launcher fix)"
 fi
 
 # Launch scripts written by --fix before v1.1 matched only lowercase ".appimage"
@@ -310,6 +350,7 @@ for gpu in $GPUS; do
   else bad "No Vulkan driver for your $gpu GPU"; fix "$pkg"; fi
 done
 [ -z "$GPUS" ] && info "Couldn't identify the GPU — skipped the Vulkan driver check"
+case " $GPUS " in *" virtual "*) warn "This is a virtual machine's graphics adapter — the game needs a real GPU and won't run properly here" ;; esac
 # AMD's AMDVLK driver next to Mesa's RADV: Proton/DXVK may pick AMDVLK, which breaks many games
 if printf '%s' "$ICDS" | grep -q 'amd_icd'; then
   warn "AMDVLK is installed alongside Mesa's RADV driver — Proton can pick AMDVLK, which often fails to start or draw games"
@@ -333,6 +374,9 @@ if ls /sys/class/power_supply/BAT* >/dev/null 2>&1; then
 fi
 is_offload_wrapper() { grep -qs '__NV_PRIME_RENDER_OFFLOAD' "$1"; }
 is_dri_prime_wrapper() { grep -qs 'DRI_PRIME=1' "$1"; }
+if [ $HYBRID = 0 ] && [ $HYBRID_MESA = 0 ] && [ -n "$GPUS" ] && [[ " $GPUS " != *" virtual "* ]]; then
+  info "GPU choice is automatic: the game uses your graphics card, there's nothing to select"
+fi
 if [ $HYBRID_MESA = 1 ]; then
   if [ -n "$UMU" ] && is_dri_prime_wrapper "$UMU"; then
     ok "Laptop with two GPUs — the umu-run wrapper sends the game to the discrete GPU (DRI_PRIME=1)"
@@ -364,6 +408,14 @@ section "6. Game prefix"
 PLAYER_LOG="$PREFIX/$LOG_DIR_GAME/Player.log"
 if [ -d "$PREFIX/drive_c" ] || [ -d "$PREFIX/pfx/drive_c" ]; then
   ok "Prefix exists ($(tilde "$PREFIX"))"
+  # A crash or power-off while Proton sets the prefix up (first Play, or after a Proton update)
+  # can leave Windows system files empty; then even Proton's helper can't start and Play does nothing
+  SYSDIR=$PREFIX/drive_c/windows/system32; [ -d "$SYSDIR" ] || SYSDIR=$PREFIX/pfx/drive_c/windows/system32
+  empty=$(find "$SYSDIR" "${SYSDIR%/system32}/syswow64" -maxdepth 1 -type f -size 0 \( -iname '*.dll' -o -iname '*.exe' \) 2>/dev/null | wc -l)
+  if [ "$empty" -gt 0 ]; then
+    bad "The game's Wine prefix is damaged: $empty Windows system files are empty (usually from a crash or the computer turning off during the game's first start)"
+    fix "Set the damaged prefix aside so a fresh one is made on the next Play: mv $(shpath "$PREFIX") $(shpath "$PREFIX").broken-$(date +%Y%m%d)   (your game download isn't touched; in-game settings are in the old folder if you want them back)"
+  fi
   [ -f "$PLAYER_LOG" ] && info "Last game log: $(date -r "$PLAYER_LOG" '+%Y-%m-%d %H:%M')  ($(tilde "$PLAYER_LOG"))"
 else
   info "Prefix not created yet ($(tilde "$PREFIX")) — umu-run creates it on the first Play"
@@ -378,11 +430,11 @@ if [ -f "$LLOG" ]; then
   last=$(last_session "$LLOG")
   found=0
   if printf '%s' "$last" | grep -q 'umu-launcher not found'; then
-    found=1; bad "Launcher reported \"umu-launcher not found\" on its last run"; fix "$UMU_INSTALL"
+    found=1; bad "Launcher reported \"umu-launcher not found\" on its last run"; fix "$(umu_install)"
   fi
   if printf '%s' "$last" | grep -qE "No module named 'encodings'|Fatal Python error"; then
     found=1; bad "umu-run crashed inside the launcher (AppImage leaked its Python/GTK environment)"
-    fix "$SELF --fix   (installs a wrapper that strips the AppImage's environment before umu-run)"
+    fix "$SELF --fix   (required: installs a small umu-run wrapper that removes the AppImage's settings, and an app-menu entry “Monsters & Memories” to start the launcher with it)"
   fi
   if printf '%s' "$last" | grep -q 'Failed to start game via umu-run'; then
     found=1; bad "Launcher: $(printf '%s' "$last" | grep -m1 'Failed to start game via umu-run' | scrub | cut -c1-160)"
@@ -502,9 +554,18 @@ EOF
       ok "Created menu entry \"Monsters & Memories\" ($(tilde "$DATA_HOME/applications/mnm-launcher.desktop"))"
     fi
     have update-desktop-database && update-desktop-database "$DATA_HOME/applications" 2>/dev/null
-    info "Close the launcher if it's open, then start it from the app menu so it picks this up"
+    info "Next: close the launcher if it's open, then start “Monsters & Memories” from your app menu (not the AppImage file) and press Play"
   fi
 fi
+
+# The game process: argv[0] is mnm.exe and it carries the launcher's GAMEID (arguments are never read)
+find_game() {
+  local p a0
+  for p in $(pgrep -u "$(id -u)" -f 'mnm\.exe' 2>/dev/null); do
+    a0=$(tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null | head -1)
+    case ${a0,,} in *mnm.exe) [ "$(envof "$p" GAMEID)" = "$GAMEID" ] && { echo "$p"; return; } ;; esac
+  done
+}
 
 # ── --test: prove umu → Proton → prefix works, without starting the game ──────
 LINK_OK=0
@@ -512,7 +573,7 @@ if [ $DO_TEST = 1 ]; then
   section "Test: umu-run → Proton → game prefix"
   if [ $FAILS -gt 0 ] && [ -z "$UMU" ]; then
     bad "Skipped — install umu-run first"
-  elif pgrep -u "$(id -u)" -f 'mnm\.exe' >/dev/null; then
+  elif [ -n "$(find_game)" ]; then
     # Don't poke the prefix while someone's playing — and the game being up already
     # proves the link; --watch confirms it without touching anything.
     info "Skipped — the game is running. Close it first, or use --watch instead"
@@ -524,15 +585,27 @@ if [ $DO_TEST = 1 ]; then
     # Same env the launcher passes; scrub the AppImage-ish vars in case this runs from one.
     # PROTON_VERB=run: the default waitforexitandrun blocks until the whole prefix
     # (wineserver) goes idle, which can hang long after cmd itself has exited.
-    env -u LD_LIBRARY_PATH -u LD_PRELOAD -u PYTHONHOME -u PYTHONPATH \
-        WINEPREFIX="$PREFIX" GAMEID=$GAMEID PROTONPATH="$PROTON" PROTON_VERB=run \
-        timeout 900 "$U" cmd /c echo MNM_LINK_OK < /dev/null > "$tlog" 2>&1
-    if grep -q MNM_LINK_OK "$tlog"; then
+    umu_env() {
+      env -u LD_LIBRARY_PATH -u LD_PRELOAD -u PYTHONHOME -u PYTHONPATH \
+          WINEPREFIX="$PREFIX" GAMEID=$GAMEID PROTONPATH="$PROTON" PROTON_VERB=run timeout 900 "$U" "$@" < /dev/null
+    }
+    # umu-launcher 1.4.4+ only runs executables that exist as files, so use cmd.exe's real path;
+    # on a fresh prefix, let umu-run create it first (an empty program name only sets it up)
+    find_cmd() { local c; for c in "$PREFIX/drive_c/windows/system32/cmd.exe" "$PREFIX/pfx/drive_c/windows/system32/cmd.exe"; do
+      [ -s "$c" ] && { echo "$c"; return; }; done; }
+    TESTEXE=$(find_cmd)
+    [ -z "$TESTEXE" ] && { umu_env "" > /dev/null 2>&1; TESTEXE=$(find_cmd); }
+    # Proton starts programs through its umu.exe helper, which doesn't pass their output back,
+    # so have cmd.exe write a file inside the prefix and look for that instead
+    marker="${TESTEXE%/windows/system32/cmd.exe}/mnm-link-test.txt"; rm -f "$marker"
+    umu_env "${TESTEXE:-cmd}" /c "echo MNM_LINK_OK> C:\\mnm-link-test.txt" > "$tlog" 2>&1
+    if grep -qs MNM_LINK_OK "$marker" || grep -q MNM_LINK_OK "$tlog"; then
+      rm -f "$marker"
       ok "umu-run started Proton in the game prefix and ran a Windows command"
       LINK_OK=1
     else
       bad "umu-run couldn't run a Windows program in the game prefix. Last output:"
-      grep -v -E 'ProtonFixes|^[[:space:]]*$' "$tlog" | scrub | tail -8 | detail
+      grep -v -E 'ProtonFixes|^INFO: |^[[:space:]]*$' "$tlog" | scrub | tail -8 | detail
       fix "Check the output above; common causes are no network on first run (GE-Proton download) or a missing Vulkan driver"
     fi
     rm -f "$tlog"
@@ -542,13 +615,6 @@ fi
 # ── --watch: confirm the real thing — launcher → umu-run → mnm.exe ────────────
 # Looks for a process whose argv[0] is mnm.exe carrying the launcher's GAMEID, then
 # waits for the game to write Player.log in the prefix. Never prints its arguments.
-find_game() {
-  local p a0
-  for p in $(pgrep -u "$(id -u)" -f 'mnm\.exe' 2>/dev/null); do
-    a0=$(tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null | head -1)
-    case ${a0,,} in *mnm.exe) [ "$(envof "$p" GAMEID)" = "$GAMEID" ] && { echo "$p"; return; } ;; esac
-  done
-}
 started_at() {  # epoch seconds a process started (the /proc/<pid> mtime is only when it was first looked up)
   local ticks btime
   ticks=$(awk '{print $22}' "/proc/$1/stat" 2>/dev/null) btime=$(awk '/^btime/{print $2}' /proc/stat)
@@ -575,12 +641,26 @@ game_gpus() {  # GPUs the game process has open, e.g. "NVIDIA" or "AMD (integrat
 }
 if [ $DO_WATCH = 1 ]; then
   section "Watch: launcher → mnm.exe"
-  start=$(date +%s); GPID=$(find_game); saw_umu=0
+  start=$(date +%s); GPID=$(find_game); saw_umu=0 crashed=0
+  # umu-run dies within a second when the AppImage's Python settings reach it — too fast
+  # to see as a process, so watch the session log and launcher log for the crash instead
+  crash_count() { cat "$HOME/.xsession-errors" "$MNM_HOME/launcher.log" 2>/dev/null | grep -c "No module named 'encodings'"; }
+  crashes_before=$(crash_count)
   if [ -n "$GPID" ]; then info "Game is already running"
   else
     info "Open the launcher and press Play — waiting up to 10 minutes (Ctrl+C to stop)…"
     while [ -z "$GPID" ] && [ $(( $(date +%s) - start )) -lt 600 ]; do
       sleep 2; GPID=$(find_game)
+      if [ -z "$GPID" ] && [ "$(crash_count)" -gt "$crashes_before" ]; then
+        crashed=1
+        bad "You pressed Play, but umu-run crashed straight away (the AppImage's Python settings reached it) — that's why nothing happens"
+        if [ $WRAPPER_INSTALLED = 1 ]; then
+          fix "Close the launcher, then start “Monsters & Memories” from your app menu (that entry uses the fix). Don't open the AppImage file directly"
+        else
+          fix "$SELF --fix   (required: installs a small umu-run wrapper that removes the AppImage's settings, and an app-menu entry “Monsters & Memories” to start the launcher with it)"
+        fi
+        break
+      fi
       if pgrep -u "$(id -u)" -f 'umu-run .*mnm\.exe' >/dev/null; then
         [ $saw_umu = 0 ] && info "Launcher called umu-run — starting Proton…"; saw_umu=1
       elif [ $saw_umu = 1 ] && [ -z "$GPID" ]; then
@@ -637,7 +717,7 @@ if [ $DO_WATCH = 1 ]; then
       else fix "Post this output at https://github.com/cooldead/mnm-linux-check/issues (it contains no personal data)"; fi
       [ $HYBRID = 1 ] && ! is_offload_wrapper "${UMU:-/nonexistent}" && fix "$SELF --fix   (on hybrid laptops the game can hang like this on the integrated GPU; the wrapper moves it to NVIDIA)"
     fi
-  elif [ $saw_umu = 0 ]; then
+  elif [ $saw_umu = 0 ] && [ $crashed = 0 ]; then
     bad "No mnm.exe appeared within 10 minutes"
   fi
 fi

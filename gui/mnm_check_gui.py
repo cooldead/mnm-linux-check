@@ -8,6 +8,9 @@ without them, or with --cli, it runs the same check in the terminal.
     python3 mnm-linux-check.py            open the window
     python3 mnm-linux-check.py --cli ...  terminal check (same options as the .sh: --test, --watch, --fix, --appimage PATH)
     add --report to print it without personal data (home paths, user/host names, tokens), for bug reports
+
+MNM_CHECK_EVENTLOG=FILE appends a timestamped log of everything done in the window
+(buttons, dialogs, chosen files, check output) to FILE, with personal data removed.
 """
 import getpass
 import os
@@ -20,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 # build.sh replaces this with the full mnm-linux-check.sh, making this file self-contained.
 CHECK_SCRIPT = r'''@@CHECK_SCRIPT@@'''
@@ -146,8 +150,21 @@ def scrub(text):
     return text
 
 
+def event_log(what, detail=""):
+    """Testing aid: record window activity when MNM_CHECK_EVENTLOG is set."""
+    path = os.environ.get("MNM_CHECK_EVENTLOG")
+    if not path:
+        return
+    stamp = time.strftime("%H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d}"
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(scrub(f"{stamp}  {what:<14} {detail}".rstrip()) + "\n")
+    except OSError:
+        pass
+
+
 # ── fix text → prose + copyable command ─────────────────────────────────────────
-COMMAND_START = re.compile(r"(?:^|:\s+|\(\w[\w .]*:\s+)((?:sudo|pipx|chmod|mkdir|bash|python3)\s.*)")
+COMMAND_START = re.compile(r"(?:^|:\s+|\(\w[\w .]*:\s+)((?:sudo|pipx|chmod|mkdir|bash|python3|cd|curl|wget|mv)\s.*)")
 
 
 def split_fix(text):
@@ -302,10 +319,14 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             self.result = None
             self.problem_rows = []
             self.report = []
+            self.fix_just_applied = False
+            self.last_finished = 0.0
+            self.last_mode = None
 
             self.win = Gtk.ApplicationWindow(application=app, title=TITLE)
             self.win.set_default_size(820, 780)
             self.win.connect("close-request" if GTK4 else "delete-event", self.on_close)
+            self.win.connect("notify::is-active", self.on_focus)
 
             outer = box(True, 10)
             for side in ("top", "bottom", "start", "end"):
@@ -374,6 +395,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             set_child(self.win, outer)
             shown(self.win)
             self.win.present()
+            event_log("window-open", f"GTK {Gtk.get_major_version()}.{Gtk.get_minor_version()}")
             mode = next((m for m in ("fix", "test", "watch") if f"--{m}" in args), "check")
             self.run(args, mode)
 
@@ -397,6 +419,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             self.stop_btn.set_visible(mode in ("test", "watch"))
             for btn in self.buttons.values():
                 btn.set_sensitive(False)
+            event_log("run-start", f"{mode} {' '.join(extra)}")
             self.script = write_script()
             try:
                 self.proc = subprocess.Popen(["bash", self.script, *extra], env=check_env(True),
@@ -421,11 +444,21 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 except ProcessLookupError:
                     pass
 
+        def on_focus(self, *_):
+            # Back from the terminal or launcher: refresh the list so finished steps disappear.
+            # Never after Watch/Test, whose results would be thrown away.
+            if (self.win.is_active() and not self.proc and self.fixes and self.last_mode in ("check", "fix")
+                    and time.monotonic() - self.last_finished > 3):
+                event_log("auto-recheck", "window active again")
+                self.run([])
+
         def on_close(self, *_):
+            event_log("window-close")
             self.stop()
             return False
 
         def on_line(self, line):
+            event_log("output", line.replace("\t", " | "))
             kind, _, text = line.partition("\t")
             if not kind.startswith("@@"):
                 if line.strip():
@@ -470,7 +503,20 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             self.stop_btn.set_visible(False)
             for btn in self.buttons.values():
                 btn.set_sensitive(True)
+            self.last_finished, self.last_mode = time.monotonic(), self.mode
+            if self.mode == "fix" and not error and code in (0, 1):   # 1 = problems found before fixing
+                # The run that applied the fix checked the system *before* fixing it: check again
+                self.fix_just_applied = True
+                GLib.idle_add(lambda: self.run([]) or False)
+                return False
             self.show_fixes()
+            needs_fix = any(f" --fix" in f for f in self.fixes)
+            for btn in [self.buttons["fix"]]:
+                if GTK4:
+                    (btn.add_css_class if needs_fix else btn.remove_css_class)("suggested-action")
+                else:
+                    ctx = btn.get_style_context()
+                    (ctx.add_class if needs_fix else ctx.remove_class)("suggested-action")
             state = self.result[0] if self.result else None
             if error:
                 self.set_banner("bad", error)
@@ -489,6 +535,13 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 self.set_banner("bad", "Stopped.")
             else:
                 self.set_banner("bad", f"The check ended unexpectedly (exit code {code}). See the details below.")
+            if self.fix_just_applied:
+                self.fix_just_applied = False
+                self.set_banner("ok" if state != "problems" else "bad",
+                                "✓ Launcher fix applied.\nNext: close the M&M launcher if it's open, then start "
+                                "“Monsters & Memories” from your app menu (not the AppImage file) and press "
+                                "“Watch for Play” here before pressing Play.")
+            event_log("run-end", f"exit {code} | {self.banner_text.get_text()}".replace("\n", " "))
             return False
 
         def set_banner(self, state, text):
@@ -526,6 +579,10 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                                        (". " + fix.split(") and ", 1)[1].capitalize() + "."
                                         if ") and " in fix else ""), selectable=True))
                     btn = Gtk.Button(label={"fix": "Apply launcher fix…", "test": "Test Proton"}[action])
+                    if action == "fix":
+                        css_class(btn, "suggested-action")
+                        append(body, label("Press the button below. Afterwards, start the launcher from your app "
+                                           "menu (“Monsters & Memories”), not from the AppImage file.", "dim"))
                     btn.connect("clicked", self.on_action, action)
                     btn.set_halign(Gtk.Align.START)
                     append(body, btn)
@@ -545,10 +602,11 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                         copy.connect("clicked", self.on_copy, command)
                         append(row, copy)
                         append(body, row)
-                        hint = "Paste it into a terminal and press Enter"
-                        if command.startswith("sudo"):
-                            hint += " (it will ask for your password)"
-                        append(body, label(hint + (f". {note}" if note else "."), "dim"))
+                        hint = "Press Copy, paste it into a terminal (right-click → Paste, or Ctrl+Shift+V) and press Enter"
+                        if "sudo " in command:
+                            hint += ". It asks for your password; nothing shows while you type it, that's normal"
+                        hint += (f". {note[0].upper() + note[1:]}" if note else "")
+                        append(body, label(hint + ". Then come back here; the list updates by itself.", "dim"))
                     if "--appimage" in fix:
                         btn = Gtk.Button(label="Choose AppImage…")
                         btn.connect("clicked", self.on_action, "appimage")
@@ -557,12 +615,14 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 append(self.todo, shown(card))
 
         def on_copy(self, button, command):
+            event_log("copy-command", command)
             copy_text(command)
             button.set_label("Copied!")
             GLib.timeout_add(1500, lambda: button.set_label("Copy") or False)
 
         # ── buttons ──────────────────────────────────────────────────────────
         def on_action(self, _button, key):
+            event_log("button", key + (" (ignored: check still running)" if self.proc else ""))
             if self.proc:
                 return
             if key == "check":
@@ -585,6 +645,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 lines += [f"  {i}. {fix}" for i, fix in enumerate(self.fixes, 1)]
             lines.append("\nResult: " + self.banner_text.get_text().replace("\n", " "))
             copy_text(scrub("\n".join(lines)))
+            event_log("copy-report", f"{len(lines)} lines")
             button.set_label("Copied!")
             GLib.timeout_add(1500, lambda: button.set_label("Copy report") or False)
 
@@ -607,6 +668,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             dialog.present()
 
         def on_fix_response(self, dialog, response):
+            event_log("fix-dialog", "OK" if response == Gtk.ResponseType.OK else "cancel")
             dialog.destroy()
             if response == Gtk.ResponseType.OK:
                 self.run(["--fix"], "fix")
@@ -628,6 +690,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             path = chooser.get_file().get_path() if response == Gtk.ResponseType.ACCEPT and chooser.get_file() else None
             chooser.destroy()
             self.chooser = None
+            event_log("appimage-chosen", path or "(cancelled)")
             if path:
                 self.appimage = path
                 self.run([])
