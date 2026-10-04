@@ -18,9 +18,13 @@
 #   --fix             install the env-cleaning umu-run wrapper + launch script (see below)
 #   --appimage PATH   launcher AppImage, if it isn't in ~/Applications, ~/Downloads, …
 #
+# MNM_CHECK_GUI=1 switches output to tab-separated "@@kind\ttext" records for the GUI.
+#
 # Read-only unless --fix is given. Never prints the launcher's login token (it's on
 # mnm.exe's command line) — only argv[0] of game processes is ever shown.
 
+SELF=${MNM_CHECK_SELF:-bash $0}                # how to re-run this check, for the fix list
+GUI=${MNM_CHECK_GUI:-0}
 GAMEID=umu-monstersandmemories
 DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 PREFIX=${MNM_WINEPREFIX:-$DATA_HOME/mnm/mnm/pfx}
@@ -37,21 +41,29 @@ while [ $# -gt 0 ]; do
     --fix) DO_FIX=1 ;;
     --appimage) APPIMAGE_ARG=$2; shift ;;
     --appimage=*) APPIMAGE_ARG=${1#*=} ;;
-    -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (try --help)"; exit 2 ;;
   esac
   shift
 done
 
 # ── output helpers ────────────────────────────────────────────────────────────
-if [ -t 1 ]; then G=$'\e[32m' R=$'\e[31m' Y=$'\e[33m' B=$'\e[1m' D=$'\e[2m' N=$'\e[0m'; else G= R= Y= B= D= N=; fi
+if [ -t 1 ] && [ "$GUI" != 1 ]; then G=$'\e[32m' R=$'\e[31m' Y=$'\e[33m' B=$'\e[1m' D=$'\e[2m' N=$'\e[0m'; else G= R= Y= B= D= N=; fi
 FAILS=0 WARNS=0
 declare -a FIXES=()                            # numbered "do this" list printed at the end
+if [ "$GUI" = 1 ]; then
+section() { printf '@@section\t%s\n' "$1"; }
+ok()   { printf '@@ok\t%s\n' "$1"; }
+bad()  { printf '@@bad\t%s\n' "$1"; FAILS=$((FAILS+1)); }
+warn() { printf '@@warn\t%s\n' "$1"; WARNS=$((WARNS+1)); }
+info() { printf '@@info\t%s\n' "$1"; }
+else
 section() { printf '\n%s%s%s\n' "$B" "$1" "$N"; }
 ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$1"; }
 bad()  { printf '  %s✗%s %s\n' "$R" "$N" "$1"; FAILS=$((FAILS+1)); }
 warn() { printf '  %s!%s %s\n' "$Y" "$N" "$1"; WARNS=$((WARNS+1)); }
 info() { printf '  %s·%s %s\n' "$D" "$N" "$1"; }
+fi
 fix()  { local f; for f in "${FIXES[@]}"; do [ "$f" = "$1" ] && return; done; FIXES+=("$1"); }
 have() { command -v "$1" >/dev/null 2>&1; }
 tilde() { printf '%s' "${1/#$HOME/\~}"; }
@@ -95,7 +107,8 @@ UMU_INSTALL=$(case $FAMILY in
 esac)
 [ $IMMUTABLE = 1 ] && UMU_INSTALL="pipx install umu-launcher   (image-based distro — or use your distro's documented way to add umu-launcher)"
 
-printf '%sMonsters & Memories — Linux launcher check%s  %s(%s; GPU:%s)%s\n' "$B" "$N" "$D" "$OS_NAME" "${GPUS:- unknown}" "$N"
+if [ "$GUI" = 1 ]; then printf '@@system\t%s\t%s\n' "$OS_NAME" "${GPUS:-unknown}"
+else printf '%sMonsters & Memories — Linux launcher check%s  %s(%s; GPU:%s)%s\n' "$B" "$N" "$D" "$OS_NAME" "${GPUS:- unknown}" "$N"; fi
 
 # ── 1. System ─────────────────────────────────────────────────────────────────
 section "1. System"
@@ -281,7 +294,7 @@ if [ -f "$LLOG" ]; then
   fi
   if printf '%s' "$last" | grep -qE "No module named 'encodings'|Fatal Python error"; then
     found=1; bad "umu-run crashed inside the launcher (AppImage leaked its Python/GTK environment)"
-    fix "bash $0 --fix   (installs a wrapper that strips the AppImage's environment before umu-run)"
+    fix "$SELF --fix   (installs a wrapper that strips the AppImage's environment before umu-run)"
   fi
   if printf '%s' "$last" | grep -q 'Failed to start game via umu-run'; then
     found=1; bad "Launcher: $(printf '%s' "$last" | grep -m1 'Failed to start game via umu-run' | cut -c1-160)"
@@ -418,7 +431,7 @@ if [ $DO_WATCH = 1 ]; then
         [ $saw_umu = 0 ] && info "Launcher called umu-run — starting Proton…"; saw_umu=1
       elif [ $saw_umu = 1 ] && [ -z "$GPID" ]; then
         bad "umu-run exited before mnm.exe appeared — Proton failed to start the game"
-        fix "bash $0 --test   (shows Proton's error) and check $(tilde "$MNM_HOME/launcher.log")"
+        fix "$SELF --test   (shows Proton's error) and check $(tilde "$MNM_HOME/launcher.log")"
         break
       fi
     done
@@ -447,6 +460,12 @@ if [ $DO_WATCH = 1 ]; then
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
+if [ "$GUI" = 1 ]; then
+  for f in "${FIXES[@]}"; do printf '@@fix\t%s\n' "$f"; done
+  if [ $FAILS -eq 0 ] && [ $LINK_OK = 1 ]; then printf '@@result\tconfirmed\n'; exit 0
+  elif [ $FAILS -eq 0 ]; then printf '@@result\tready\n'; exit 0
+  else printf '@@result\tproblems\t%d\n' "$FAILS"; exit 1; fi
+fi
 section "Result"
 if [ ${#FIXES[@]} -gt 0 ]; then
   printf '  %sDo these, in order, then run this check again:%s\n' "$B" "$N"
