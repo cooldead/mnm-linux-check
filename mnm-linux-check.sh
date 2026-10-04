@@ -341,11 +341,13 @@ fi
 
 ICDS=$(ls /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json 2>/dev/null | xargs -rn1 basename | tr '\n' ' ')
 for gpu in $GPUS; do
+  pat="" pkg=""
   case $gpu in
     nvidia) pat='nvidia' pkg=$(case $FAMILY in arch) echo "sudo pacman -S --needed nvidia-utils lib32-nvidia-utils";; fedora) echo "install NVIDIA's driver from RPM Fusion: sudo dnf install akmod-nvidia xorg-x11-drv-nvidia-libs.i686";; debian) echo "install NVIDIA's proprietary driver (Ubuntu: sudo ubuntu-drivers install)";; *) echo "install NVIDIA's proprietary driver for your distro";; esac) ;;
     amd)    pat='radeon' pkg=$(pkg_cmd 'vulkan-radeon lib32-vulkan-radeon' 'mesa-vulkan-drivers mesa-vulkan-drivers.i686' mesa-vulkan-drivers libvulkan_radeon) ;;
     intel)  pat='intel'  pkg=$(pkg_cmd 'vulkan-intel lib32-vulkan-intel' 'mesa-vulkan-drivers mesa-vulkan-drivers.i686' mesa-vulkan-drivers libvulkan_intel) ;;
   esac
+  [ -z "$pat" ] && continue                     # e.g. a virtual machine's adapter: no driver to check
   if printf '%s' "$ICDS" | grep -q "$pat"; then ok "Vulkan driver for $gpu GPU installed"
   else bad "No Vulkan driver for your $gpu GPU"; fix "$pkg"; fi
 done
