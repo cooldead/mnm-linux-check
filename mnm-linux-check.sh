@@ -64,6 +64,7 @@ bad()  { printf '  %s✗%s %s\n' "$R" "$N" "$1"; FAILS=$((FAILS+1)); }
 warn() { printf '  %s!%s %s\n' "$Y" "$N" "$1"; WARNS=$((WARNS+1)); }
 info() { printf '  %s·%s %s\n' "$D" "$N" "$1"; }
 fi
+detail() { sed 's/^/        /'; }               # stdin → indented detail lines under the last item
 fix()  { local f; for f in "${FIXES[@]}"; do [ "$f" = "$1" ] && return; done; FIXES+=("$1"); }
 have() { command -v "$1" >/dev/null 2>&1; }
 tilde() { printf '%s' "${1/#$HOME/\~}"; }
@@ -354,6 +355,13 @@ if [ -f "$LLOG" ]; then
   if printf '%s' "$last" | grep -q 'Failed to resolve launcher install directory'; then
     found=1; bad "Launcher couldn't work out its install folder"; fix "Start the launcher from the .appimage file itself (not an extracted copy)"
   fi
+  # What umu-run/Proton/Wine printed after the launcher handed off the game
+  proton_out=$(printf '%s\n' "$last" | sed -n '/Launching via umu-run/,$p' | sed -E 's/(--token[= ])[^ ]+/\1<hidden>/g' \
+    | grep -vE "^ProtonFixes|^INFO: |atk-bridge|unable to use parent for game drive|Executable is a unix path|^Proton: /|ntsync: up|^\s*$" | tail -15)
+  if printf '%s' "$proton_out" | grep -qiE 'err:|error|fail|vulkan|dxvk|vkd3d|exception|crash|segfault|abort'; then
+    warn "Proton/Wine reported problems on the last game start ($(date -r "$LLOG" '+%Y-%m-%d %H:%M')):"
+    printf '%s\n' "$proton_out" | detail
+  fi
   if [ $found = 0 ]; then
     if printf '%s' "$last" | grep -q 'Proton: .*mnm\.exe'; then ok "Last run handed mnm.exe to Proton cleanly ($(date -r "$LLOG" '+%Y-%m-%d %H:%M'))"
     else ok "No launcher errors in the last session"; fi
@@ -512,6 +520,25 @@ started_at() {  # epoch seconds a process started (the /proc/<pid> mtime is only
   ticks=$(awk '{print $22}' "/proc/$1/stat" 2>/dev/null) btime=$(awk '/^btime/{print $2}' /proc/stat)
   echo $(( btime + ${ticks:-0} / $(getconf CLK_TCK) ))
 }
+gpu_name() {  # gpu_name <drm card/render node name> → "AMD (integrated)", "NVIDIA", …
+  local dev=/sys/class/drm/$1/device v n
+  v=$(cat "$dev/vendor" 2>/dev/null)
+  case $v in 0x10de) n=NVIDIA ;; 0x1002) n=AMD ;; 0x8086) n=Intel ;; *) n="GPU $v" ;; esac
+  if [ "${HYBRID_MESA:-0}" = 1 ] && [ "$v" != 0x10de ]; then   # integrated vs discrete only matters on AMD/Intel laptops
+    [ "$(cat "$dev/boot_vga" 2>/dev/null)" = 1 ] && n="$n (integrated)" || n="$n (discrete)"
+  fi
+  echo "$n"
+}
+game_gpus() {  # GPUs the game process has open, e.g. "NVIDIA" or "AMD (integrated)"
+  local f t
+  for f in /proc/"$1"/fd/*; do
+    t=$(readlink "$f" 2>/dev/null) || continue
+    case $t in
+      /dev/nvidia[0-9]*) echo NVIDIA ;;
+      /dev/dri/renderD*|/dev/dri/card*) gpu_name "${t#/dev/dri/}" ;;
+    esac
+  done | sort -u | paste -sd, | sed 's/,/, /g'
+}
 if [ $DO_WATCH = 1 ]; then
   section "Watch: launcher → mnm.exe"
   start=$(date +%s); GPID=$(find_game); saw_umu=0
@@ -536,17 +563,43 @@ if [ $DO_WATCH = 1 ]; then
     [ "${wp%/}" = "${PREFIX%/}" ] && ok "Started by umu-run in the launcher's prefix" \
       || warn "Running from a different prefix ($(tilde "$wp")) — the map app looks in $(tilde "$PREFIX")"
     pp=$(envof "$GPID" PROTONPATH); [ -n "$pp" ] && ok "Proton: $(basename "$pp")"
+    # Did the GPU-offload settings from the wrapper reach the game?
+    offload=""
+    [ "$(envof "$GPID" __NV_PRIME_RENDER_OFFLOAD)" = 1 ] && offload="NVIDIA PRIME offload"
+    [ "$(envof "$GPID" DRI_PRIME)" = 1 ] && offload="DRI_PRIME=1"
+    if [ -n "$offload" ]; then ok "Game got the GPU-offload settings ($offload)"
+    elif [ $HYBRID = 1 ] || [ $HYBRID_MESA = 1 ]; then
+      bad "Game started WITHOUT the GPU-offload settings — the launcher didn't go through the fix's umu-run wrapper"
+      fix "Close the launcher and start it from the \"Monsters & Memories\" app-menu entry that Apply launcher fix created (not by double-clicking the AppImage). If you never applied it: $SELF --fix"
+    fi
     info "Waiting for the game to write its log…"
-    gstart=$(started_at "$GPID")
+    gstart=$(started_at "$GPID") gpus=""
     for _ in $(seq 1 45); do
+      g=$(game_gpus "$GPID"); [ -n "$g" ] && gpus=$g
       [ -f "$PLAYER_LOG" ] && [ "$(stat -c %Y "$PLAYER_LOG")" -ge "$gstart" ] && break
       sleep 2
     done
+    g=$(game_gpus "$GPID"); [ -n "$g" ] && gpus=$g
+    if [ -z "$gpus" ]; then
+      warn "The game hasn't opened any GPU — it's stuck before starting its renderer"
+    elif [ $HYBRID = 1 ] && ! printf '%s' "$gpus" | grep -q NVIDIA; then
+      bad "Game is using $gpus, not the NVIDIA GPU"
+    elif [ $HYBRID_MESA = 1 ] && ! printf '%s' "$gpus" | grep -q discrete; then
+      warn "Game is using $gpus, not the discrete GPU"
+    else
+      ok "Game is using: $gpus"
+    fi
     if [ -f "$PLAYER_LOG" ] && [ "$(stat -c %Y "$PLAYER_LOG")" -ge "$gstart" ]; then
       ok "Game is writing Player.log — the map app can follow your zones"
       LINK_OK=1
     else
-      warn "mnm.exe is up but hasn't written Player.log yet ($(tilde "$PLAYER_LOG")) — give it until the login screen and re-run --watch"
+      bad "mnm.exe is running but hasn't written Player.log after 90 seconds ($(tilde "$PLAYER_LOG")) — the game is stuck before its first screen"
+      if [ -f "$LLOG" ]; then
+        tail_out=$(awk '/App data directory:/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$LLOG" | sed -n '/Launching via umu-run/,$p' \
+          | sed -E 's/(--token[= ])[^ ]+/\1<hidden>/g' | grep -vE "^ProtonFixes|^INFO: |atk-bridge|^\s*$" | tail -15)
+        [ -n "$tail_out" ] && { info "Proton/Wine output for this start (from $(tilde "$LLOG")):"; printf '%s\n' "$tail_out" | detail; }
+      fi
+      fix "Press “Copy report” (or copy this output) and post it at https://github.com/cooldead/mnm-linux-check/issues"
       [ $HYBRID = 1 ] && ! is_offload_wrapper "${UMU:-/nonexistent}" && fix "$SELF --fix   (on hybrid laptops the game can hang like this on the integrated GPU; the wrapper moves it to NVIDIA)"
     fi
   elif [ $saw_umu = 0 ]; then

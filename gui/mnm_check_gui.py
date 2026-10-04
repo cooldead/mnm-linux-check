@@ -257,6 +257,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             self.fixes = []
             self.result = None
             self.problem_rows = []
+            self.report = []
 
             self.win = Gtk.ApplicationWindow(application=app, title=TITLE)
             self.win.set_default_size(820, 780)
@@ -313,6 +314,8 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                                                "AppImage's environment from breaking umu-run. Asks first."),
                 ("appimage", "Choose AppImage…", "Point the check at your MonstersAndMemories .appimage "
                                                  "if it isn't in ~/Applications, ~/Downloads or similar."),
+                ("report", "Copy report", "Copy the full result as text, to paste into a bug report or Discord. "
+                                          "It never includes your login token."),
             ):
                 btn = Gtk.Button(label=text)
                 btn.set_tooltip_text(tip)
@@ -338,6 +341,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 extra = [*extra, "--appimage", self.appimage]
             self.mode = mode
             self.fixes, self.result, self.problem_rows = [], None, []
+            self.report = [f"{TITLE} ({'--' + mode if mode != 'check' else 'check'})"]
             clear(self.todo)
             clear(self.details)
             self.todo_title.set_visible(False)
@@ -381,16 +385,20 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             kind, _, text = line.partition("\t")
             if not kind.startswith("@@"):
                 if line.strip():
+                    self.report.append("    " + line.strip())
                     append(self.details, shown(label(line, "detail", selectable=True)))
                 return False
             kind = kind[2:]
             if kind == "system":
                 os_name, _, gpus = text.partition("\t")
                 self.system.set_text(f"{os_name} · GPU: {gpus.strip() or 'unknown'}")
+                self.report.append(f"{os_name} · GPU: {gpus.strip() or 'unknown'}")
             elif kind == "section":
                 append(self.details, shown(label(text, "section")))
+                self.report.append(f"\n{text}")
             elif kind in MARKS:
                 mark, cls = MARKS[kind]
+                self.report.append(f"  {mark} {text}")
                 row = box(False, 6)
                 append(row, label(mark, "mark", cls, wrap=False))
                 text_lbl = label(text, *(["dim"] if kind == "info" else []), selectable=True)
@@ -523,6 +531,18 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 self.confirm_fix()
             elif key == "appimage":
                 self.choose_appimage()
+            elif key == "report":
+                self.copy_report(_button)
+
+        def copy_report(self, button):
+            lines = list(self.report)
+            if self.fixes:
+                lines.append("\nWhat to do:")
+                lines += [f"  {i}. {fix}" for i, fix in enumerate(self.fixes, 1)]
+            lines.append("\nResult: " + self.banner_text.get_text().replace("\n", " "))
+            copy_text("\n".join(lines))
+            button.set_label("Copied!")
+            GLib.timeout_add(1500, lambda: button.set_label("Copy report") or False)
 
         def confirm_fix(self):
             dialog = Gtk.MessageDialog(transient_for=self.win, modal=True,

@@ -23,8 +23,9 @@ It never installs or changes anything by itself. The only button that writes fil
 | --- | --- |
 | Check again | Re-runs every check. Read-only. |
 | Test Proton | Runs a harmless Windows command through `umu-run` in the game's prefix, without starting the game. The first run may download GE-Proton (about 500 MB). |
-| Watch for Play | Waits up to 10 minutes for you to press Play, then confirms the game really started. |
+| Watch for Play | Waits up to 10 minutes for you to press Play, then confirms the game really started, shows which GPU it's using, and, if it hangs, shows what Proton printed. |
 | Apply launcher fix… | Installs a small `umu-run` wrapper and launch script that stop the AppImage's environment from crashing `umu-run` (the "nothing happens" bug). Writes only to your home folder. |
+| Copy report | Copies the whole result as text, to paste into a [bug report](../../issues/new/choose) or Discord. It never includes your login token. |
 | Choose AppImage… | Use this if your launcher AppImage isn't in `~/Applications`, `~/Downloads` or a similar folder. |
 
 ## What it checks
