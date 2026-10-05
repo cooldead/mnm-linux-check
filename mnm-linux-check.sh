@@ -181,7 +181,7 @@ if [ -n "$APPIMAGE_ARG" ]; then APPIMAGE=$APPIMAGE_ARG
 elif [ -n "$LAUNCHER_PID" ]; then APPIMAGE=$(envof "$LAUNCHER_PID" APPIMAGE)
 fi
 if [ -z "$APPIMAGE" ]; then  # newest MonstersAndMemories*.appimage in the usual drop spots
-  APPIMAGE=$(find "$HOME/Applications" "$HOME/Downloads" "$HOME/Desktop" "$HOME/Games" "$HOME/.local/bin" "$HOME" /opt \
+  APPIMAGE=$(find "$HOME/Games/MonstersAndMemories" "$HOME/Applications" "$HOME/Downloads" "$HOME/Desktop" "$HOME/Games" "$HOME/.local/bin" "$HOME" /opt \
                -maxdepth 1 -iname 'MonstersAndMemories*.appimage' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 fi
 
@@ -251,6 +251,7 @@ else
     pre=$(sed -n 's/^ *export PATH="\{0,1\}\([^"]*\):\$PATH.*/\1/p' "$DESKTOP_EXEC" | head -1)
     pre=${pre//\$HOME/$HOME}; pre=${pre//\$\{HOME\}/$HOME}
     [ -n "$pre" ] && LPATH=$pre:$LPATH PATH_SRC="$PATH_SRC + $(tilde "$DESKTOP_EXEC")"
+    grep -q '^ *export PATH=.*:\$HOME/\.local/bin"' "$DESKTOP_EXEC" && LPATH=$LPATH:$HOME/.local/bin
   fi
 fi
 
@@ -287,7 +288,8 @@ else
   fi
   # umu-run is Python — a broken Python install or a half-installed pipx copy fails here
   if v=$(timeout 30 "$UMU" --version 2>&1) && printf '%s' "$v" | grep -qi 'umu'; then
-    ok "umu-run works: $(printf '%s' "$v" | grep -io 'umu-launcher version [0-9.]*' | head -1)"
+    UMU_VERSION=$(printf '%s' "$v" | grep -io 'version [0-9.]*' | head -1)
+    ok "umu-run works: umu-launcher $UMU_VERSION"
   else
     bad "umu-run is on PATH but fails to run:"
     printf '%s\n' "$v" | scrub | tail -4 | detail
@@ -301,6 +303,13 @@ fi
 CRASH_SEEN=0
 grep -qs "No module named 'encodings'" "$HOME/.xsession-errors" "$MNM_HOME/launcher.log" && CRASH_SEEN=1
 WRAPPER_INSTALLED=0; is_wrapper "$WRAP_DIR/umu-run" && WRAPPER_INSTALLED=1
+WRAPPER_CURRENT=0
+grep -qs '^# mnm-wrapper 2' "$WRAP_DIR/umu-run" && grep -qs '^# mnm-launch 2' "$MNM_HOME/mnm-launcher.sh" && WRAPPER_CURRENT=1
+WHITE_SEEN=0; grep -qs 'Could not create default EGL display' "$MNM_HOME/launcher.log" && WHITE_SEEN=1
+if [ $WRAPPER_INSTALLED = 1 ] && [ $WRAPPER_CURRENT = 0 ]; then
+  warn "The launcher fix is an older version: it works, but the window's Settings (GPU, MangoHud, GameMode…) need the new one, and on newer distros (Fedora 44, Bazzite…) the launcher window can stay white without it$([ $WHITE_SEEN = 1 ] && echo ' — your launcher log shows this')"
+  fix "$SELF --fix   (updates the launcher fix; nothing else changes)"
+fi
 if [ -z "$UMU" ] || ! is_wrapper "$UMU"; then   # also when umu-run is still missing: the list shows every step up front
   if [ $WRAPPER_INSTALLED = 1 ] && [ -n "$LAUNCHER_PID" ]; then
     bad "The launcher is running WITHOUT the launcher fix, so Play does nothing — it was started from the AppImage file or an old shortcut"
@@ -476,7 +485,7 @@ else:
 PY
   then ok "PyGObject + GTK installed (the check window can open)"
   else
-    warn "PyGObject/GTK not found — the check window (mnm-linux-check.py) falls back to the terminal"
+    warn "PyGObject/GTK not found — the MnM on Linux window (mnm-on-linux.py) falls back to the terminal"
     fix "$(pkg_cmd 'python-gobject gtk4' 'python3-gobject gtk4' 'python3-gi gir1.2-gtk-4.0' 'python3-gobject-Gdk typelib-1_0-Gtk-4_0')   (only needed for the check window)"
   fi
 else
@@ -496,10 +505,10 @@ if [ $DO_FIX = 1 ]; then
     mkdir -p "$WRAP_DIR"
     cat > "$WRAP_DIR/umu-run" <<'EOF'
 #!/usr/bin/env bash
-# Wrapper used by the Monsters & Memories launcher (AppImage), written by mnm-linux-check.sh.
-# The AppImage leaks its bundled Python/GTK/library env into child processes,
-# which crashes umu-run ("No module named 'encodings'") and can break Proton.
-# Strip those, then hand off to the real umu-run (next one on PATH after this dir).
+# mnm-wrapper 2 — umu-run wrapper for the Monsters & Memories launcher (AppImage), written by
+# MnM on Linux (mnm-linux-check). The AppImage leaks its bundled Python/GTK/library env into
+# child processes, which crashes umu-run ("No module named 'encodings'") and can break Proton.
+# Strip those, apply the player's settings, then hand off to the real umu-run.
 unset PYTHONHOME PYTHONPATH LD_LIBRARY_PATH LD_PRELOAD \
       GTK_DATA_PREFIX GTK_THEME GTK_EXE_PREFIX GTK_PATH GTK_IM_MODULE_FILE \
       GDK_PIXBUF_MODULE_FILE GDK_BACKEND GIO_EXTRA_MODULES GSETTINGS_SCHEMA_DIR
@@ -509,21 +518,44 @@ if [ -n "$APPDIR" ]; then
   export PATH XDG_DATA_DIRS
   unset APPDIR APPIMAGE ARGV0 OWD
 fi
-# Laptops with two GPUs: run the game on the discrete one (set MNM_NO_PRIME_OFFLOAD=1 to skip).
-# NVIDIA Optimus needs PRIME render offload; AMD/Intel + AMD (Mesa) uses DRI_PRIME=1.
-if [ -z "${MNM_NO_PRIME_OFFLOAD:-}" ] && ls /sys/class/power_supply/BAT* >/dev/null 2>&1; then
-  vendors=$(cat /sys/class/drm/card*/device/vendor 2>/dev/null)
+
+# Settings from the MnM on Linux window (KEY=value lines; only known keys/values are used)
+MNM_GPU=auto MNM_RENDERER=dxvk MNM_WAYLAND=0 MNM_HDR=0 MNM_MANGOHUD=0 MNM_GAMEMODE=0
+conf=${XDG_CONFIG_HOME:-$HOME/.config}/mnm-on-linux/settings.conf
+if [ -f "$conf" ]; then
+  while IFS='=' read -r key value; do
+    case "$key=$value" in
+      MNM_GPU=auto|MNM_GPU=discrete|MNM_GPU=default) MNM_GPU=$value ;;
+      MNM_RENDERER=dxvk|MNM_RENDERER=wined3d) MNM_RENDERER=$value ;;
+      MNM_WAYLAND=[01]|MNM_HDR=[01]|MNM_MANGOHUD=[01]|MNM_GAMEMODE=[01]) printf -v "$key" '%s' "$value" ;;
+    esac
+  done < "$conf"
+fi
+[ -n "${MNM_NO_PRIME_OFFLOAD:-}" ] && MNM_GPU=default   # older opt-out still works
+
+# GPU: on computers with two GPUs, run the game on the fast (discrete) one.
+# "auto" does this on laptops; "discrete" always; "default" leaves the choice to the system.
+vendors=$(cat /sys/class/drm/card*/device/vendor 2>/dev/null)
+gpus=$(printf '%s\n' "$vendors" | grep -c .)
+if [ "$gpus" -ge 2 ] && { [ "$MNM_GPU" = discrete ] || { [ "$MNM_GPU" = auto ] && ls /sys/class/power_supply/BAT* >/dev/null 2>&1; }; }; then
   if [ -e /proc/driver/nvidia/version ] && printf '%s\n' "$vendors" | grep -qvx 0x10de; then
     export __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only __GLX_VENDOR_LIBRARY_NAME=nvidia
-  elif [ "$(printf '%s\n' "$vendors" | grep -c .)" -ge 2 ] && [ -z "${DRI_PRIME:-}" ]; then
+  elif [ -z "${DRI_PRIME:-}" ]; then
     export DRI_PRIME=1
   fi
 fi
+[ "$MNM_RENDERER" = wined3d ] && export PROTON_USE_WINED3D=1
+[ "$MNM_WAYLAND" = 1 ] && export PROTON_ENABLE_WAYLAND=1
+[ "$MNM_HDR" = 1 ] && export PROTON_ENABLE_WAYLAND=1 PROTON_ENABLE_HDR=1
+[ "$MNM_MANGOHUD" = 1 ] && command -v mangohud >/dev/null && export MANGOHUD=1
+launch=()
+[ "$MNM_GAMEMODE" = 1 ] && command -v gamemoderun >/dev/null && launch=(gamemoderun)
+
 self=$(dirname "$(readlink -f "$0")")
 IFS=: read -ra dirs <<< "$PATH"
 for d in "${dirs[@]}" /usr/bin /usr/local/bin "$HOME/.local/bin"; do
   [ "$(readlink -f "$d")" = "$self" ] && continue
-  [ -x "$d/umu-run" ] && exec "$d/umu-run" "$@"
+  [ -x "$d/umu-run" ] && exec "${launch[@]}" "$d/umu-run" "$@"
 done
 echo "umu-run wrapper: no real umu-run found on PATH" >&2; exit 127
 EOF
@@ -533,10 +565,19 @@ EOF
     LAUNCH=$MNM_HOME/mnm-launcher.sh
     cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
-# Starts the Monsters & Memories launcher with the umu-run wrapper first in PATH,
-# saving its output to launcher.log (written by mnm-linux-check.sh).
+# mnm-launch 2 — starts the Monsters & Memories launcher with the umu-run wrapper first in PATH,
+# saving its output to launcher.log (written by MnM on Linux / mnm-linux-check.sh).
 APP=\$(find "$(dirname "$APPIMAGE")" -maxdepth 1 -iname 'MonstersAndMemories*.appimage' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
-export PATH="$WRAP_DIR:\$PATH"
+# ~/.local/bin (where MnM on Linux installs umu-run) is only on PATH after a re-login on some distros
+export PATH="$WRAP_DIR:\$PATH:\$HOME/.local/bin"
+# The launcher AppImage bundles an old libwayland-client. Newer Mesa (Fedora 44, Bazzite…) can't use it,
+# so its window stays white ("Could not create default EGL display"). Use the system's copy instead;
+# the umu-run wrapper drops LD_PRELOAD again before Proton starts. MNM_NO_WAYLAND_PRELOAD=1 skips this.
+if [ -z "\${MNM_NO_WAYLAND_PRELOAD:-}" ]; then
+  for lib in /usr/lib64/libwayland-client.so.0 /usr/lib/x86_64-linux-gnu/libwayland-client.so.0 /usr/lib/libwayland-client.so.0; do
+    [ -f "\$lib" ] && { export LD_PRELOAD="\$lib\${LD_PRELOAD:+:\$LD_PRELOAD}"; break; }
+  done
+fi
 LOG="$MNM_HOME/launcher.log"
 [ -f "\$LOG" ] && [ "\$(stat -c%s "\$LOG")" -gt 5000000 ] && mv -f "\$LOG" "\$LOG.old"
 exec "\$APP" "\$@" >> "\$LOG" 2>&1
@@ -726,6 +767,19 @@ fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 if [ "$GUI" = 1 ]; then
+  # Setup steps for the window: id, state (done/todo), detail
+  step() { printf '@@step\t%s\t%s\t%s\n' "$1" "$2" "${3:-}"; }
+  if [ -z "$APPIMAGE" ]; then step launcher todo
+  elif [ ! -x "$APPIMAGE" ]; then step launcher chmod "$APPIMAGE"
+  else step launcher done "$(tilde "$APPIMAGE")"; fi
+  if ldconfig -p 2>/dev/null | grep -q 'libfuse\.so\.2 ' || ls /usr/lib*/libfuse.so.2 /usr/lib/*/libfuse.so.2 >/dev/null 2>&1 || [ -n "$LAUNCHER_PID" ]; then step fuse done
+  else step fuse todo "$(pkg_cmd fuse2 fuse-libs libfuse2t64 libfuse2)"; fi
+  if have umu-run || [ -x "$HOME/.local/bin/umu-run" ] || [ -n "$UMU" ]; then step umu done "${UMU_VERSION:-$(umu-run --version 2>/dev/null | grep -io 'version [0-9.]*' | head -1)}"   # the copy the launcher uses
+  else step umu todo; fi
+  if [ $WRAPPER_CURRENT = 1 ]; then step fix done; elif [ $WRAPPER_INSTALLED = 1 ]; then step fix update; else step fix todo; fi
+  if [ -n "$GAME_DIR" ] && [ -f "$GAME_DIR/mnm.exe" ]; then step game done "$(tilde "$GAME_DIR")"; else step game todo; fi
+  [ "${empty:-0}" -gt 0 ] && step prefix damaged "$PREFIX"
+  printf '@@gpus\t%s\t%s\t%s\n' "${GPU_COUNT:-0}" "$GPUS" "$([ ${HYBRID:-0} = 1 ] || [ ${HYBRID_MESA:-0} = 1 ] && echo laptop)"
   for f in "${FIXES[@]}"; do printf '@@fix\t%s\n' "$f"; done
   if [ $FAILS -eq 0 ] && [ $LINK_OK = 1 ]; then printf '@@result\tconfirmed\n'; exit 0
   elif [ $FAILS -eq 0 ]; then printf '@@result\tready\n'; exit 0

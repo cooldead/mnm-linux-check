@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds dist/mnm-linux-check.py: the GUI with mnm-linux-check.sh embedded, as one file for players.
+# Builds dist/mnm-on-linux.py: the GUI with mnm-linux-check.sh embedded, as one file for players.
 set -euo pipefail
 cd "$(dirname "$0")"
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
@@ -13,8 +13,8 @@ if "'''" in script or script.endswith("\\"):
 gui = Path("gui/mnm_check_gui.py").read_text()
 marker = "r'''@@CHECK_SCRIPT@@'''"
 assert gui.count(marker) == 1
-Path("dist/mnm-linux-check.py").write_text(gui.replace(marker, "r'''" + script + "'''"))
+Path("dist/mnm-on-linux.py").write_text(gui.replace(marker, "r'''" + script + "'''"))
 EOF
-chmod +x dist/mnm-linux-check.py
-python3 -m py_compile dist/mnm-linux-check.py
-echo "Built dist/mnm-linux-check.py"
+chmod +x dist/mnm-on-linux.py
+python3 -m py_compile dist/mnm-on-linux.py
+echo "Built dist/mnm-on-linux.py"
