@@ -106,6 +106,8 @@ proton_lines() {
 # ── distro + GPU, so the fix commands are the right ones for this machine ─────
 OS_ID= OS_LIKE= OS_NAME=Linux
 [ -r /etc/os-release ] && . /etc/os-release && OS_ID=${ID:-} OS_LIKE=${ID_LIKE:-} OS_NAME=${PRETTY_NAME:-Linux}
+# MX Linux keeps Debian's os-release; its own name is in /etc/mx-version ("MX-25.3_Xfce_x64 Infinity …")
+[ -r /etc/mx-version ] && OS_NAME="MX Linux $(sed -n '1s/^MX-\([0-9.]*\).*/\1/p' /etc/mx-version) (Debian ${VERSION_ID:-})"
 case " $OS_ID $OS_LIKE " in
   *" arch "*|*" cachyos "*|*" manjaro "*|*" endeavouros "*) FAMILY=arch ;;
   *" fedora "*|*" rhel "*|*" nobara "*|*" bazzite "*) FAMILY=fedora ;;
@@ -124,6 +126,23 @@ for v in /sys/class/drm/card*/device/vendor; do
     0x1af4|0x1234|0x15ad|0x80ee|0x1414) GPUS="$GPUS virtual" ;; esac   # virtio, QEMU, VMware, VirtualBox, Hyper-V
 done
 GPUS=$(printf '%s\n' $GPUS | sort -u | tr '\n' ' ')
+
+# Debian 13 / Ubuntu 24.04 renamed libfuse2 to libfuse2t64; older releases (Debian 12 = MX-23, Ubuntu 22.04) still use libfuse2
+case ${UBUNTU_CODENAME:-${DEBIAN_CODENAME:-${VERSION_CODENAME:-}}} in
+  buster|bullseye|bookworm|focal|jammy) FUSE_DEB=libfuse2 ;;
+  *) FUSE_DEB=libfuse2t64 ;;
+esac
+
+# Is a 64-bit system library installed? ldconfig lives in /sbin, which isn't on a normal user's PATH on
+# Debian/MX, so try it there too, then look for the file itself.
+have_lib() {  # have_lib libfoo.so.1
+  { ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null || /usr/sbin/ldconfig -p 2>/dev/null; } \
+    | grep -q "^[[:space:]]*${1//./\\.} .*x86-64" && return 0
+  local f
+  for f in /usr/lib64/"$1" /usr/lib/x86_64-linux-gnu/"$1" /lib/x86_64-linux-gnu/"$1" /usr/lib/"$1"; do [ -e "$f" ] && return 0; done
+  return 1
+}
+have_fuse2() { have_lib libfuse.so.2; }
 
 pkg_cmd() {  # pkg_cmd <arch pkgs> <fedora pkgs> <debian pkgs> <suse pkgs>
   case $FAMILY in
@@ -197,13 +216,13 @@ else
 fi
 
 # AppImages mount themselves with FUSE 2 (libfuse.so.2), which many distros no longer ship by default
-if ldconfig -p 2>/dev/null | grep -q 'libfuse\.so\.2 ' || ls /usr/lib*/libfuse.so.2 /usr/lib/*/libfuse.so.2 >/dev/null 2>&1; then
+if have_fuse2; then
   ok "FUSE 2 (libfuse.so.2) is installed — AppImages can mount"
 elif [ -n "$LAUNCHER_PID" ]; then
   ok "FUSE 2 not detected, but the launcher is running anyway"
 else
   bad "FUSE 2 (libfuse.so.2) missing — the AppImage won't open"
-  fix "$(pkg_cmd fuse2 fuse-libs 'libfuse2t64   (Ubuntu 22.04/Debian 12 and older: libfuse2)' libfuse2)"
+  fix "$(pkg_cmd fuse2 fuse-libs $FUSE_DEB libfuse2)"
 fi
 
 # ── 3. Game files ─────────────────────────────────────────────────────────────
@@ -332,6 +351,19 @@ fi
 
 # ── 5. Proton + runtime + Vulkan ──────────────────────────────────────────────
 section "5. Proton, Steam Runtime, Vulkan"
+# Proton runs inside Steam's container (pressure-vessel), which needs normal users to be allowed to
+# create user namespaces. On by default almost everywhere; hardened setups and some kernels turn it off.
+USERNS_OK=1 USERNS_CMD=""
+if [ "$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null)" = 0 ]; then
+  USERNS_OK=0 USERNS_CMD="echo kernel.unprivileged_userns_clone=1 | sudo tee /etc/sysctl.d/90-mnm-userns.conf && sudo sysctl -w kernel.unprivileged_userns_clone=1"
+elif [ "$(cat /proc/sys/user/max_user_namespaces 2>/dev/null)" = 0 ]; then
+  USERNS_OK=0 USERNS_CMD="echo user.max_user_namespaces=15000 | sudo tee /etc/sysctl.d/90-mnm-userns.conf && sudo sysctl -w user.max_user_namespaces=15000"
+fi
+if [ $USERNS_OK = 1 ]; then ok "User namespaces are allowed (Proton's container can start)"
+else
+  bad "User namespaces are turned off on this system — Proton's container can't start, so the game never opens"
+  fix "$USERNS_CMD   (allows them now and after every restart; needs your password)"
+fi
 if [ "$PROTON" = GE-Proton ]; then
   ge=$(ls -d "$DATA_HOME"/Steam/compatibilitytools.d/GE-Proton* "$HOME"/.steam/root/compatibilitytools.d/GE-Proton* 2>/dev/null | sort -V | tail -1)
   if [ -n "$ge" ]; then ok "GE-Proton downloaded ($(basename "$ge"))"
@@ -342,7 +374,7 @@ else bad "MNM_PROTONPATH=$(tilde "$PROTON") is not a directory"; fix "Unset MNM_
 if ls -d "$DATA_HOME"/umu/steamrt* >/dev/null 2>&1; then ok "Steam Linux Runtime present ($(ls -d "$DATA_HOME"/umu/steamrt* | xargs -n1 basename | tr '\n' ' '))"
 else info "Steam Linux Runtime not downloaded yet — umu-run fetches it on the first Play"; fi
 
-if ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1 .*x86-64'; then ok "Vulkan loader installed"
+if have_lib libvulkan.so.1; then ok "Vulkan loader installed"
 else
   bad "Vulkan loader (libvulkan.so.1) missing — Proton/DXVK can't draw anything"
   fix "$(pkg_cmd 'vulkan-icd-loader lib32-vulkan-icd-loader' vulkan-loader libvulkan1 libvulkan1)"
@@ -772,8 +804,9 @@ if [ "$GUI" = 1 ]; then
   if [ -z "$APPIMAGE" ]; then step launcher todo
   elif [ ! -x "$APPIMAGE" ]; then step launcher chmod "$APPIMAGE"
   else step launcher done "$(tilde "$APPIMAGE")"; fi
-  if ldconfig -p 2>/dev/null | grep -q 'libfuse\.so\.2 ' || ls /usr/lib*/libfuse.so.2 /usr/lib/*/libfuse.so.2 >/dev/null 2>&1 || [ -n "$LAUNCHER_PID" ]; then step fuse done
-  else step fuse todo "$(pkg_cmd fuse2 fuse-libs libfuse2t64 libfuse2)"; fi
+  if have_fuse2 || [ -n "$LAUNCHER_PID" ]; then step fuse done
+  else step fuse todo "$(pkg_cmd fuse2 fuse-libs $FUSE_DEB libfuse2)"; fi
+  if [ $USERNS_OK = 1 ]; then step userns done; else step userns todo "$USERNS_CMD"; fi
   if have umu-run || [ -x "$HOME/.local/bin/umu-run" ] || [ -n "$UMU" ]; then step umu done "${UMU_VERSION:-$(umu-run --version 2>/dev/null | grep -io 'version [0-9.]*' | head -1)}"   # the copy the launcher uses
   else step umu todo; fi
   if [ $WRAPPER_CURRENT = 1 ]; then step fix done; elif [ $WRAPPER_INSTALLED = 1 ]; then step fix update; else step fix todo; fi

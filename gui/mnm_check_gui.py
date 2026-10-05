@@ -33,7 +33,7 @@ import urllib.request
 CHECK_SCRIPT = r'''@@CHECK_SCRIPT@@'''
 
 APP_NAME = "MnM on Linux"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 TITLE = APP_NAME
 APP_ID = "io.github.mnm.LinuxCheck"
 REPO = "cooldead/mnm-linux-check"
@@ -527,6 +527,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             self.gpu_info = ("0", "", "")
             self.busy_action = None
             self.skip_update = False
+            self.seen_optional = set()
             self.settings = load_settings()
 
             self.win = Gtk.ApplicationWindow(application=app, title=TITLE)
@@ -752,7 +753,6 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
 
         def step_rows(self):
             """[(key, short name, title, {state: (text, button, action)})] in the order a new player does them."""
-            game_cmd = self.steps.get("fuse", ("", ""))[1]
             rows = [
                 ("launcher", "Launcher", "Get the official launcher",
                  {"todo": ("Downloads the official Linux launcher (about 107 MB) from the Monsters & Memories "
@@ -763,6 +763,10 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 ("fuse", "FUSE", "Install FUSE 2 (lets the launcher file open)",
                  {"todo": ("This needs your password, so copy this command into a terminal and run it. "
                            "Then come back here: the next step appears by itself.", None, None)}),
+                ("userns", "Sandbox", "Allow Proton's sandbox",
+                 {"todo": ("Proton runs the game inside a sandbox, and this system doesn't allow normal users to "
+                           "create one (user namespaces are turned off). This needs your password, so copy this "
+                           "command into a terminal and run it. Then come back here.", None, None)}),
                 ("umu", "umu-run", "Install umu-run",
                  {"todo": ("umu-run is the tool the launcher uses to start the game with Proton. This downloads "
                            "its single-file version from its GitHub page into ~/.local/bin. No password needed.",
@@ -793,8 +797,11 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             self.note.set_visible(bool(self.note.get_text()))
             if not self.steps:
                 return
-            rows = self.step_rows()
             state_of = lambda k: self.steps.get(k, ("done", ""))[0]
+            # FUSE and the sandbox are only needed on some systems: list them once they've come up, so the
+            # step count doesn't change halfway through
+            self.seen_optional |= {k for k in ("fuse", "userns") if state_of(k) != "done"}
+            rows = [r for r in self.step_rows() if r[0] not in ("fuse", "userns") or r[0] in self.seen_optional]
             pending = lambda k: state_of(k) != "done" and not (state_of(k) == "update" and self.skip_update)
             current = next((i for i, (k, *_r) in enumerate(rows) if pending(k)), None)
             self.trail.set_text("   ".join(("✓ " if not pending(k) else "● " if i == current else "○ ") + short
@@ -810,8 +817,8 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             append(self.step_box, shown(label(title, "title")))
             text, button, action = states.get(state, states.get("todo", ("", None, None)))
             append(self.step_box, shown(label(text)))
-            if key == "fuse":
-                game_cmd = self.steps["fuse"][1]
+            if key in ("fuse", "userns"):
+                game_cmd = self.steps[key][1]
                 row = box(False, 8)
                 cmd = label(game_cmd, "cmd", selectable=True)
                 cmd.set_hexpand(True)
@@ -835,7 +842,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 later = Gtk.Button(label="Not now")
                 later.connect("clicked", lambda *_: (setattr(self, "skip_update", True), self.refresh_setup()))
                 append(buttons, later)
-            if key in ("fuse", "game"):
+            if key in ("fuse", "userns", "game"):
                 again = Gtk.Button(label="Check again")
                 again.connect("clicked", lambda *_: self.run([]))
                 append(buttons, again)

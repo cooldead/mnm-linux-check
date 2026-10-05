@@ -25,6 +25,7 @@ In order, skipping any that are already done (a line at the bottom shows ✓ don
 
 1. **Get the official launcher**: downloads it into `~/Games/MonstersAndMemories`, or choose a file you already have.
 2. **FUSE 2**, only if it's missing: a copyable command to run in a terminal (it needs your password).
+   **Allow Proton's sandbox**, only on the rare systems that turn off user namespaces: also a copyable command.
 3. **Install umu-run**: its single-file version into `~/.local/bin`, no password.
 4. **Apply the launcher fix** (or **Update fix** if you have an older one).
 5. **Install the game**: opens the launcher; sign in and press Install there.
