@@ -82,6 +82,10 @@ Python 3 (`umu-run` needs it too) plus PyGObject with GTK 4 or 3 for the window.
 
 On laptops with an integrated plus a discrete GPU, the game can start on the slow integrated GPU, or sit on "Game is running" with no window (NVIDIA Optimus). The check detects this, and with the launcher fix the game uses the discrete GPU: PRIME render offload on NVIDIA, `DRI_PRIME=1` on AMD/Intel + AMD. Change this under **Settings → Graphics card** ("Always use the fast card" for desktops, "Let the system decide" to turn it off). `MNM_NO_PRIME_OFFLOAD=1` still turns it off too.
 
+### Ubuntu 22.04 and distros based on it
+
+On Pop!_OS 22.04, Linux Mint 21, Zorin OS 17, elementary OS 7 and other Ubuntu 22.04-based systems, the official launcher quits as soon as you open it (`undefined symbol: hb_ot_layout_get_horizontal_baseline_tag_for_script`). It brings its own copy of a text library (Pango) that needs a newer HarfBuzz than these systems have. The launcher fix handles this: there, it starts the launcher with your system's own Pango, so open the launcher from the app menu entry, not from the AppImage file. `MNM_NO_PANGO_PRELOAD=1` turns this off.
+
 ### Privacy
 
 The check never shows personal data. Paths in your home folder appear as `~/…`, download IDs in file names as `<id>`, and anything it copies out of logs or tools (Proton/Wine output, error messages) has these removed:

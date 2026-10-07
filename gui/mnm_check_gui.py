@@ -33,7 +33,7 @@ import urllib.request
 CHECK_SCRIPT = r'''@@CHECK_SCRIPT@@'''
 
 APP_NAME = "MnM on Linux"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 TITLE = APP_NAME
 APP_ID = "io.github.mnm.LinuxCheck"
 REPO = "cooldead/mnm-linux-check"
@@ -472,12 +472,15 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
 
     def load_css(css):
         provider = Gtk.CssProvider()
-        if hasattr(provider, "load_from_string"):
+        if hasattr(provider, "load_from_string"):  # GTK 4.12+
             provider.load_from_string(css)
-        elif GTK4:
-            provider.load_from_data(css, -1)
         else:
-            provider.load_from_data(css.encode())
+            # GTK 3 and GTK 4.0-4.8 take bytes only (PyGObject 3.42 on Ubuntu/Pop!_OS 22.04 has no
+            # override to adapt the call); GTK 4.9-4.11 without that override want (text, length).
+            try:
+                provider.load_from_data(css.encode())
+            except TypeError:
+                provider.load_from_data(css, -1)
         priority = Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         if GTK4:
             Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), provider, priority)
@@ -778,6 +781,10 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                            "Apply fix", self.do_fix),
                   "update": ("Your launcher fix is an older version. Update it so your Settings are used and the "
                              "launcher window doesn't stay white on newer distros.",
+                             "Update fix", self.do_fix),
+                  "needed": ("Required: your launcher fix is an older version, and on this system the launcher "
+                             "can't start without the new one (its bundled text library needs a newer HarfBuzz "
+                             "than your system has, so it quits at once).",
                              "Update fix", self.do_fix)}),
                 ("game", "Game", "Install the game",
                  {"todo": ("Open the launcher, sign in and press Install (about 7 GB). The game goes into "

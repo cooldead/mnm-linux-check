@@ -322,12 +322,28 @@ fi
 CRASH_SEEN=0
 grep -qs "No module named 'encodings'" "$HOME/.xsession-errors" "$MNM_HOME/launcher.log" && CRASH_SEEN=1
 WRAPPER_INSTALLED=0; is_wrapper "$WRAP_DIR/umu-run" && WRAPPER_INSTALLED=1
+# The AppImage's bundled Pango needs HarfBuzz 4+; with an older system HarfBuzz (Ubuntu 22.04 and its
+# derivatives) the launcher quits at once. Launch scripts from "mnm-launch 3" on use the system Pango there.
+OLD_HARFBUZZ=0
+for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
+  [ -f "$d/libharfbuzz.so.0" ] || continue
+  grep -qa hb_ot_layout_get_horizontal_baseline_tag_for_script "$d/libharfbuzz.so.0" || OLD_HARFBUZZ=1
+  break
+done
+PANGO_SEEN=0; grep -qs 'undefined symbol: hb_ot_layout_get_horizontal_baseline_tag_for_script' "$MNM_HOME/launcher.log" && PANGO_SEEN=1
+LAUNCH_OK='^# mnm-launch [23]'; [ $OLD_HARFBUZZ = 1 ] && LAUNCH_OK='^# mnm-launch 3'
 WRAPPER_CURRENT=0
-grep -qs '^# mnm-wrapper 2' "$WRAP_DIR/umu-run" && grep -qs '^# mnm-launch 2' "$MNM_HOME/mnm-launcher.sh" && WRAPPER_CURRENT=1
+grep -qs '^# mnm-wrapper 2' "$WRAP_DIR/umu-run" && grep -qs "$LAUNCH_OK" "$MNM_HOME/mnm-launcher.sh" && WRAPPER_CURRENT=1
 WHITE_SEEN=0; grep -qs 'Could not create default EGL display' "$MNM_HOME/launcher.log" && WHITE_SEEN=1
 if [ $WRAPPER_INSTALLED = 1 ] && [ $WRAPPER_CURRENT = 0 ]; then
-  warn "The launcher fix is an older version: it works, but the window's Settings (GPU, MangoHud, GameMode…) need the new one, and on newer distros (Fedora 44, Bazzite…) the launcher window can stay white without it$([ $WHITE_SEEN = 1 ] && echo ' — your launcher log shows this')"
+  if [ $OLD_HARFBUZZ = 1 ]; then
+    bad "The launcher fix is an older version, and on this system the launcher needs the new one: its bundled text library (Pango) needs a newer HarfBuzz than your system has, so the launcher quits at once$([ $PANGO_SEEN = 1 ] && echo ' — your launcher log shows this')"
+  else
+    warn "The launcher fix is an older version: it works, but the window's Settings (GPU, MangoHud, GameMode…) need the new one, and on newer distros (Fedora 44, Bazzite…) the launcher window can stay white without it$([ $WHITE_SEEN = 1 ] && echo ' — your launcher log shows this')"
+  fi
   fix "$SELF --fix   (updates the launcher fix; nothing else changes)"
+elif [ $WRAPPER_INSTALLED = 0 ] && [ $OLD_HARFBUZZ = 1 ]; then
+  info "On this system the launcher AppImage can't start by itself (its bundled Pango needs a newer HarfBuzz); the launcher fix below also takes care of that"
 fi
 if [ -z "$UMU" ] || ! is_wrapper "$UMU"; then   # also when umu-run is still missing: the list shows every step up front
   if [ $WRAPPER_INSTALLED = 1 ] && [ -n "$LAUNCHER_PID" ]; then
@@ -597,7 +613,7 @@ EOF
     LAUNCH=$MNM_HOME/mnm-launcher.sh
     cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
-# mnm-launch 2 — starts the Monsters & Memories launcher with the umu-run wrapper first in PATH,
+# mnm-launch 3 — starts the Monsters & Memories launcher with the umu-run wrapper first in PATH,
 # saving its output to launcher.log (written by MnM on Linux / mnm-linux-check.sh).
 APP=\$(find "$(dirname "$APPIMAGE")" -maxdepth 1 -iname 'MonstersAndMemories*.appimage' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 # ~/.local/bin (where MnM on Linux installs umu-run) is only on PATH after a re-login on some distros
@@ -608,6 +624,21 @@ export PATH="$WRAP_DIR:\$PATH:\$HOME/.local/bin"
 if [ -z "\${MNM_NO_WAYLAND_PRELOAD:-}" ]; then
   for lib in /usr/lib64/libwayland-client.so.0 /usr/lib/x86_64-linux-gnu/libwayland-client.so.0 /usr/lib/libwayland-client.so.0; do
     [ -f "\$lib" ] && { export LD_PRELOAD="\$lib\${LD_PRELOAD:+:\$LD_PRELOAD}"; break; }
+  done
+fi
+# The AppImage's bundled Pango needs HarfBuzz 4+. On Ubuntu 22.04-based systems (Pop!_OS 22.04, Mint 21…)
+# the system HarfBuzz is older, so the launcher quits at once ("undefined symbol:
+# hb_ot_layout_get_horizontal_baseline_tag_for_script"). There, use the system's own Pango instead.
+# MNM_NO_PANGO_PRELOAD=1 skips this.
+if [ -z "\${MNM_NO_PANGO_PRELOAD:-}" ]; then
+  for dir in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
+    [ -f "\$dir/libharfbuzz.so.0" ] || continue
+    if ! grep -qa hb_ot_layout_get_horizontal_baseline_tag_for_script "\$dir/libharfbuzz.so.0"; then
+      for lib in libpangocairo-1.0.so.0 libpangoft2-1.0.so.0 libpango-1.0.so.0; do
+        [ -f "\$dir/\$lib" ] && export LD_PRELOAD="\$dir/\$lib\${LD_PRELOAD:+:\$LD_PRELOAD}"
+      done
+    fi
+    break
   done
 fi
 LOG="$MNM_HOME/launcher.log"
@@ -809,7 +840,9 @@ if [ "$GUI" = 1 ]; then
   if [ $USERNS_OK = 1 ]; then step userns done; else step userns todo "$USERNS_CMD"; fi
   if have umu-run || [ -x "$HOME/.local/bin/umu-run" ] || [ -n "$UMU" ]; then step umu done "${UMU_VERSION:-$(umu-run --version 2>/dev/null | grep -io 'version [0-9.]*' | head -1)}"   # the copy the launcher uses
   else step umu todo; fi
-  if [ $WRAPPER_CURRENT = 1 ]; then step fix done; elif [ $WRAPPER_INSTALLED = 1 ]; then step fix update; else step fix todo; fi
+  if [ $WRAPPER_CURRENT = 1 ]; then step fix done
+  elif [ $WRAPPER_INSTALLED = 1 ] && [ $OLD_HARFBUZZ = 1 ]; then step fix needed   # the old fix can't start the launcher here
+  elif [ $WRAPPER_INSTALLED = 1 ]; then step fix update; else step fix todo; fi
   if [ -n "$GAME_DIR" ] && [ -f "$GAME_DIR/mnm.exe" ]; then step game done "$(tilde "$GAME_DIR")"; else step game todo; fi
   [ "${empty:-0}" -gt 0 ] && step prefix damaged "$PREFIX"
   printf '@@gpus\t%s\t%s\t%s\n' "${GPU_COUNT:-0}" "$GPUS" "$([ ${HYBRID:-0} = 1 ] || [ ${HYBRID_MESA:-0} = 1 ] && echo laptop)"
