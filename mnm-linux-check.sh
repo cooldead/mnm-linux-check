@@ -617,7 +617,7 @@ if [ ${#user_pre[@]} -gt 0 ]; then
   else echo "umu-run wrapper: launch options: '${user_pre[0]}' not found, starting the game without it" >&2; fi
 fi
 [ ${#user_env[@]} -gt 0 ] || [ ${#user_pre[@]} -gt 0 ] || [ ${#user_args[@]} -gt 0 ] &&
-  echo "umu-run wrapper: launch options: ${user_env[*]} ${user_pre[*]} %command% $(printf '%s\n' "${user_args[@]}" | sed '/^--token$/{n;s/.*/<hidden>/}' | paste -sd' ')" >&2   # a token is a login
+  echo "umu-run wrapper: launch options: $(printf '%s\n' "${user_env[@]}" "${user_pre[@]}" %command% "${user_args[@]}" | sed '/^--token$/{n;s/.*/<hidden>/}' | paste -sd' ')" >&2   # a token is a login
 
 self=$(dirname "$(readlink -f "$0")")
 IFS=: read -ra dirs <<< "$PATH"
