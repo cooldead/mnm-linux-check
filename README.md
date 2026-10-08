@@ -36,7 +36,7 @@ The buttons at the top open the other pages; **← Back** returns to the steps:
 
 | Page | What it does |
 | --- | --- |
-| Settings | Graphics card on computers with two GPUs, DXVK or WineD3D, native Wayland, HDR, MangoHud and GameMode. Saved to `~/.config/mnm-on-linux/settings.conf` and used the next time the game starts. |
+| Settings | Graphics card on computers with two GPUs, DXVK or WineD3D, native Wayland, HDR, MangoHud, GameMode and launch options. Saved to `~/.config/mnm-on-linux/settings.conf` and used the next time the game starts. |
 | Troubleshoot | The full launcher check, with the buttons below. |
 | About | Version, update check (updates replace the file after you confirm), links. |
 
@@ -50,6 +50,8 @@ The buttons at the top open the other pages; **← Back** returns to the steps:
 | Apply launcher fix… | Installs a small `umu-run` wrapper and launch script that stop the AppImage's environment from crashing `umu-run` (the "nothing happens" bug), and apply your Settings. Writes only to your home folder. |
 | Copy report | Copies the whole result as text, to paste into a [bug report](../../issues/new/choose) or Discord. Personal data is left out (see below). |
 | Choose AppImage… | Use this if your launcher AppImage isn't in `~/Games`, `~/Applications`, `~/Downloads` or a similar folder. |
+
+**Launch options** work like Steam's: `VARIABLE=value` settings, then `%command%`, then arguments for the game, for example `%command% -popupwindow` (borderless window), `DXVK_HUD=fps %command%` or `PROTON_LOG=1 %command%`. Don't add `--token`: the launcher already passes its own, and the window warns about it. A command before `%command%` (such as `taskset -c 0-3`) runs the game through it. Below the box, the window shows what the options will do. They need the launcher fix from v2.1.0 on; with an older one, the window offers **Update fix**.
 
 Upgrading from the old **Linux Check** (v1)? Press **Update fix** when the window shows it so the wrapper uses your Settings. The old fix keeps working until then.
 

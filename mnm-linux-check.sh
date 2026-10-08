@@ -332,12 +332,17 @@ for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
 done
 PANGO_SEEN=0; grep -qs 'undefined symbol: hb_ot_layout_get_horizontal_baseline_tag_for_script' "$MNM_HOME/launcher.log" && PANGO_SEEN=1
 LAUNCH_OK='^# mnm-launch [23]'; [ $OLD_HARFBUZZ = 1 ] && LAUNCH_OK='^# mnm-launch 3'
+# Launch options from the window's Settings need "mnm-wrapper 3"; without them version 2 is still fine.
+WRAP_OK='^# mnm-wrapper [23]'; LAUNCH_OPTS=0
+grep -qs '^MNM_\(ENV\|PRE\|ARG\)=' "${XDG_CONFIG_HOME:-$HOME/.config}/mnm-on-linux/settings.conf" && { WRAP_OK='^# mnm-wrapper 3'; LAUNCH_OPTS=1; }
 WRAPPER_CURRENT=0
-grep -qs '^# mnm-wrapper 2' "$WRAP_DIR/umu-run" && grep -qs "$LAUNCH_OK" "$MNM_HOME/mnm-launcher.sh" && WRAPPER_CURRENT=1
+grep -qs "$WRAP_OK" "$WRAP_DIR/umu-run" && grep -qs "$LAUNCH_OK" "$MNM_HOME/mnm-launcher.sh" && WRAPPER_CURRENT=1
 WHITE_SEEN=0; grep -qs 'Could not create default EGL display' "$MNM_HOME/launcher.log" && WHITE_SEEN=1
 if [ $WRAPPER_INSTALLED = 1 ] && [ $WRAPPER_CURRENT = 0 ]; then
   if [ $OLD_HARFBUZZ = 1 ]; then
     bad "The launcher fix is an older version, and on this system the launcher needs the new one: its bundled text library (Pango) needs a newer HarfBuzz than your system has, so the launcher quits at once$([ $PANGO_SEEN = 1 ] && echo ' — your launcher log shows this')"
+  elif [ $LAUNCH_OPTS = 1 ] && grep -qs '^# mnm-wrapper 2' "$WRAP_DIR/umu-run"; then
+    warn "The launcher fix is an older version that ignores the launch options in Settings"
   else
     warn "The launcher fix is an older version: it works, but the window's Settings (GPU, MangoHud, GameMode…) need the new one, and on newer distros (Fedora 44, Bazzite…) the launcher window can stay white without it$([ $WHITE_SEEN = 1 ] && echo ' — your launcher log shows this')"
   fi
@@ -553,7 +558,7 @@ if [ $DO_FIX = 1 ]; then
     mkdir -p "$WRAP_DIR"
     cat > "$WRAP_DIR/umu-run" <<'EOF'
 #!/usr/bin/env bash
-# mnm-wrapper 2 — umu-run wrapper for the Monsters & Memories launcher (AppImage), written by
+# mnm-wrapper 3 — umu-run wrapper for the Monsters & Memories launcher (AppImage), written by
 # MnM on Linux (mnm-linux-check). The AppImage leaks its bundled Python/GTK/library env into
 # child processes, which crashes umu-run ("No module named 'encodings'") and can break Proton.
 # Strip those, apply the player's settings, then hand off to the real umu-run.
@@ -568,14 +573,21 @@ if [ -n "$APPDIR" ]; then
 fi
 
 # Settings from the MnM on Linux window (KEY=value lines; only known keys/values are used)
+# Launch options arrive already split, one word per line: MNM_ENV (VAR=value), MNM_PRE (command the
+# game runs through, before %command%), MNM_ARG (argument for the game, after %command%).
 MNM_GPU=auto MNM_RENDERER=dxvk MNM_WAYLAND=0 MNM_HDR=0 MNM_MANGOHUD=0 MNM_GAMEMODE=0
+user_env=() user_pre=() user_args=()
 conf=${XDG_CONFIG_HOME:-$HOME/.config}/mnm-on-linux/settings.conf
 if [ -f "$conf" ]; then
-  while IFS='=' read -r key value; do
+  while IFS= read -r line || [ -n "$line" ]; do
+    key=${line%%=*} value=${line#*=}
     case "$key=$value" in
       MNM_GPU=auto|MNM_GPU=discrete|MNM_GPU=default) MNM_GPU=$value ;;
       MNM_RENDERER=dxvk|MNM_RENDERER=wined3d) MNM_RENDERER=$value ;;
       MNM_WAYLAND=[01]|MNM_HDR=[01]|MNM_MANGOHUD=[01]|MNM_GAMEMODE=[01]) printf -v "$key" '%s' "$value" ;;
+      MNM_ENV=*) [[ $value =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] && user_env+=("$value") ;;
+      MNM_PRE=*) user_pre+=("$value") ;;
+      MNM_ARG=*) user_args+=("$value") ;;
     esac
   done < "$conf"
 fi
@@ -598,12 +610,20 @@ fi
 [ "$MNM_MANGOHUD" = 1 ] && command -v mangohud >/dev/null && export MANGOHUD=1
 launch=()
 [ "$MNM_GAMEMODE" = 1 ] && command -v gamemoderun >/dev/null && launch=(gamemoderun)
+# Launch options last, so they can override anything above
+[ ${#user_env[@]} -gt 0 ] && export "${user_env[@]}"
+if [ ${#user_pre[@]} -gt 0 ]; then
+  if command -v "${user_pre[0]}" >/dev/null; then launch=("${user_pre[@]}" "${launch[@]}")
+  else echo "umu-run wrapper: launch options: '${user_pre[0]}' not found, starting the game without it" >&2; fi
+fi
+[ ${#user_env[@]} -gt 0 ] || [ ${#user_pre[@]} -gt 0 ] || [ ${#user_args[@]} -gt 0 ] &&
+  echo "umu-run wrapper: launch options: ${user_env[*]} ${user_pre[*]} %command% $(printf '%s\n' "${user_args[@]}" | sed '/^--token$/{n;s/.*/<hidden>/}' | paste -sd' ')" >&2   # a token is a login
 
 self=$(dirname "$(readlink -f "$0")")
 IFS=: read -ra dirs <<< "$PATH"
 for d in "${dirs[@]}" /usr/bin /usr/local/bin "$HOME/.local/bin"; do
   [ "$(readlink -f "$d")" = "$self" ] && continue
-  [ -x "$d/umu-run" ] && exec "${launch[@]}" "$d/umu-run" "$@"
+  [ -x "$d/umu-run" ] && exec "${launch[@]}" "$d/umu-run" "$@" "${user_args[@]}"
 done
 echo "umu-run wrapper: no real umu-run found on PATH" >&2; exit 127
 EOF

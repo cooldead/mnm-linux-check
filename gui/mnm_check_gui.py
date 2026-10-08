@@ -33,7 +33,7 @@ import urllib.request
 CHECK_SCRIPT = r'''@@CHECK_SCRIPT@@'''
 
 APP_NAME = "MnM on Linux"
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.1.0"
 TITLE = APP_NAME
 APP_ID = "io.github.mnm.LinuxCheck"
 REPO = "cooldead/mnm-linux-check"
@@ -200,13 +200,39 @@ SETTINGS_CHOICES = {
 }
 
 
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def parse_launch_options(text):
+    """Steam-style launch options: "VAR=value … %command% -args". Returns (env, pre, args), where pre is a
+    command the game runs through (e.g. "taskset -c 0-3") and args go to mnm.exe. Without %command%,
+    VAR=value words set variables and everything else goes to the game. Raises ValueError on bad quoting."""
+    words = shlex.split(text)
+    is_env = lambda w: "=" in w and ENV_NAME.fullmatch(w.split("=", 1)[0]) is not None
+    if words.count("%command%") > 1:
+        raise ValueError("%command% can only appear once")
+    if "%command%" in words:
+        at = words.index("%command%")
+        before, args = words[:at], words[at + 1:]
+        n = next((i for i, w in enumerate(before) if not is_env(w)), len(before))
+        env, pre = before[:n], before[n:]
+    else:
+        env, pre, args = [w for w in words if is_env(w)], [], [w for w in words if not is_env(w)]
+    if any("\n" in w or "\0" in w for w in words):
+        raise ValueError("line breaks aren't allowed")
+    return env, pre, args
+
+
 def load_settings():
     settings = {key: values[0] for key, values in SETTINGS_CHOICES.items()}
+    settings["MNM_LAUNCH_OPTIONS"] = ""
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as f:
             for line in f:
-                key, _, value = line.strip().partition("=")
+                key, _, value = line.rstrip("\n").partition("=")
                 if value in SETTINGS_CHOICES.get(key, ()):
+                    settings[key] = value
+                elif key == "MNM_LAUNCH_OPTIONS":
                     settings[key] = value
     except OSError:
         pass
@@ -215,12 +241,29 @@ def load_settings():
 
 def save_settings(settings):
     os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+    env, pre, args = parse_launch_options(settings.get("MNM_LAUNCH_OPTIONS", ""))
     tmp = SETTINGS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write("# MnM on Linux settings: used by the umu-run wrapper each time the game starts\n")
         for key in SETTINGS_CHOICES:
             f.write(f"{key}={settings[key]}\n")
+        # Launch options as typed (shown in the window), then split into one word per line for the
+        # wrapper, so it never has to parse quotes: MNM_ENV = variable, MNM_PRE = command the game
+        # runs through, MNM_ARG = argument for the game.
+        f.write(f"MNM_LAUNCH_OPTIONS={settings.get('MNM_LAUNCH_OPTIONS', '')}\n")
+        for kind, words in (("MNM_ENV", env), ("MNM_PRE", pre), ("MNM_ARG", args)):
+            for word in words:
+                f.write(f"{kind}={word}\n")
     os.replace(tmp, SETTINGS_FILE)
+
+
+def wrapper_has_launch_options():
+    try:
+        with open(os.path.join(MNM_HOME, "bin", "umu-run"), encoding="utf-8") as f:
+            return any(line.startswith("# mnm-wrapper ") and line.split()[2].isdigit() and int(line.split()[2]) >= 3
+                       for line in f)
+    except OSError:
+        return False
 
 
 def distro_family():
@@ -1002,15 +1045,94 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             toggle("MNM_GAMEMODE", "GameMode", "Asks your system to prioritise the game while it runs.",
                    bool(shutil.which("gamemoderun")),
                    "GameMode isn't installed. To install it: " + install_command("gamemode"))
+            self.launch_options_row()
+
+        def launch_options_row(self):
+            row = box(True, 4)
+            append(row, label("Launch options", "section"))
+            append(row, label("Like Steam's launch options: VARIABLE=value settings, then %command%, then "
+                              "arguments for the game. Examples: %command% -popupwindow (borderless window), "
+                              "DXVK_HUD=fps %command% (FPS counter). Leave empty if unsure.",
+                              "dim"))
+            line = box(False, 6)
+            entry = Gtk.Entry()
+            entry.set_hexpand(True)
+            entry.set_text(self.settings.get("MNM_LAUNCH_OPTIONS", ""))
+            entry.set_placeholder_text("e.g. %command% -popupwindow")
+            append(line, entry)
+            save = Gtk.Button(label="Save")
+            append(line, save)
+            append(row, line)
+            status = label("", "dim", selectable=True)
+            append(row, status)
+
+            def describe(text):
+                """What the options will do, in plain words, or (None, error)."""
+                try:
+                    env, pre, args = parse_launch_options(text)
+                except ValueError as err:
+                    return None, f"Can't use these options: {err}. Check the quotes."
+                parts = []
+                if env:
+                    parts.append("Sets " + ", ".join(env))
+                if pre:
+                    parts.append("Runs the game through: " + shlex.join(pre))
+                if args:
+                    parts.append("Passes to the game: " + shlex.join(args))
+                return parts, None
+
+            def show(text, saved):
+                parts, error = describe(text)
+                if error:
+                    status.set_text(error)
+                    css_class(status, "bad")
+                    return
+                if GTK4:
+                    status.remove_css_class("bad")
+                else:
+                    status.get_style_context().remove_class("bad")
+                lines = parts or ["No launch options."]
+                game_args = parse_launch_options(text)[2]
+                if "--token" in game_args:
+                    lines.append("⚠ --token isn't needed here: the launcher already logs the game in with its own "
+                                 "token. A token also works like a password, and it would be saved in plain text. "
+                                 "Remove it unless you know you need it.")
+                if saved and text.strip() and not wrapper_has_launch_options():
+                    lines.append("Launch options need the updated launcher fix: press “Update fix” on the "
+                                 "main page (it's listed there now).")
+                elif not saved:
+                    lines.append("Not saved yet: press Save or Enter.")
+                status.set_text("\n".join(lines))
+
+            def on_save(*_):
+                text = " ".join(entry.get_text().split("\n")).strip()
+                if describe(text)[1]:
+                    show(text, False)
+                    return
+                if text != self.settings.get("MNM_LAUNCH_OPTIONS", ""):
+                    self.set_setting("MNM_LAUNCH_OPTIONS", text)
+                show(text, self.settings.get("MNM_LAUNCH_OPTIONS") == text)
+
+            entry.connect("activate", on_save)
+            save.connect("clicked", on_save)
+            entry.connect("changed", lambda e: show(e.get_text(), e.get_text().strip() ==
+                                                    self.settings.get("MNM_LAUNCH_OPTIONS", "")))
+            show(entry.get_text(), True)
+            append(self.settings_box, shown(row))
 
         def set_setting(self, key, value):
             if value is None or self.settings.get(key) == value:
                 return
+            previous = self.settings.get(key)
             self.settings[key] = value
             try:
                 save_settings(self.settings)
                 event_log("setting", f"{key}={value}")
-            except OSError as err:
+                if key == "MNM_LAUNCH_OPTIONS" and value and not wrapper_has_launch_options():
+                    self.skip_update = False   # the old fix ignores launch options: offer "Update fix" again
+                    self.run([])
+            except (OSError, ValueError) as err:
+                self.settings[key] = previous
                 self.setup_note(f"Couldn't save settings: {err}", False)
 
         # ── About ───────────────────────────────────────────────────────────
