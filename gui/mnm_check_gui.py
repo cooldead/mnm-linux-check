@@ -33,7 +33,7 @@ import urllib.request
 CHECK_SCRIPT = r'''@@CHECK_SCRIPT@@'''
 
 APP_NAME = "MnM on Linux"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 TITLE = APP_NAME
 APP_ID = "io.github.mnm.LinuxCheck"
 REPO = "cooldead/mnm-linux-check"
