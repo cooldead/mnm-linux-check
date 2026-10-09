@@ -33,7 +33,7 @@ import urllib.request
 CHECK_SCRIPT = r'''@@CHECK_SCRIPT@@'''
 
 APP_NAME = "MnM on Linux"
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 TITLE = APP_NAME
 APP_ID = "io.github.mnm.LinuxCheck"
 REPO = "cooldead/mnm-linux-check"
@@ -266,7 +266,7 @@ def wrapper_has_launch_options():
         return False
 
 
-def distro_family():
+def os_ids():
     ids = ""
     try:
         with open("/etc/os-release", encoding="utf-8") as f:
@@ -275,7 +275,11 @@ def distro_family():
                     ids += " " + line.split("=", 1)[1].strip().strip('"')
     except OSError:
         pass
-    ids = f" {ids} "
+    return f" {ids} "
+
+
+def distro_family():
+    ids = os_ids()
     for family, names in (("arch", ("arch", "cachyos", "manjaro", "endeavouros")),
                           ("fedora", ("fedora", "rhel", "nobara", "bazzite")),
                           ("debian", ("debian", "ubuntu", "pop", "linuxmint"))):
@@ -286,6 +290,10 @@ def distro_family():
 
 def install_command(*packages):
     pkgs = " ".join(packages)
+    if os.path.exists("/run/ostree-booted"):
+        return f"rpm-ostree install {pkgs}, then restart the computer"
+    if " steamos " in os_ids():
+        return f"{pkgs} can't be installed the usual way on SteamOS (its system is read-only)"
     return {"arch": f"sudo pacman -S --needed {pkgs}", "fedora": f"sudo dnf install {pkgs}",
             "debian": f"sudo apt install {pkgs}", "suse": f"sudo zypper install {pkgs}"}.get(
         distro_family(), f"install {pkgs} with your package manager")
@@ -1044,6 +1052,8 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                    "MangoHud isn't installed. To install it: " + install_command("mangohud"))
             toggle("MNM_GAMEMODE", "GameMode", "Asks your system to prioritise the game while it runs.",
                    bool(shutil.which("gamemoderun")),
+                   "Not needed on Bazzite: it already gives games priority on its own (Bazzite removed "
+                   "GameMode on purpose), so there's nothing to turn on." if " bazzite " in os_ids() else
                    "GameMode isn't installed. To install it: " + install_command("gamemode"))
             self.launch_options_row()
 
