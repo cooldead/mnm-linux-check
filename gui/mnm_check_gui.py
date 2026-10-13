@@ -28,12 +28,15 @@ import tempfile
 import threading
 import time
 import urllib.request
+import zlib
 
 # build.sh replaces this with the full mnm-linux-check.sh, making this file self-contained.
 CHECK_SCRIPT = r'''@@CHECK_SCRIPT@@'''
+# …and this with the Cinzel font (SIL Open Font License 1.1, gui/fonts/OFL.txt), base64-encoded.
+CINZEL_FONT = "@@CINZEL_FONT@@"
 
 APP_NAME = "MnM on Linux"
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.2.0"
 TITLE = APP_NAME
 APP_ID = "io.github.mnm.LinuxCheck"
 REPO = "cooldead/mnm-linux-check"
@@ -373,6 +376,460 @@ def self_update(asset_url, progress=None):
     return me
 
 
+# ── Steam: a library shortcut, so the game starts from Gaming Mode / Big Picture ──
+# Steam keeps non-Steam games in userdata/<account>/config/shortcuts.vdf (binary VDF). It reads the file
+# when it starts and writes it back from memory, so Steam is closed while the file is changed.
+STEAM_NAME = "Monsters & Memories"
+STEAM_SCRIPT = os.path.join(MNM_HOME, "mnm-steam.sh")
+STEAM_ICON = os.path.join(MNM_HOME, "icon.png")
+VDF_MAP, VDF_STR, VDF_INT, VDF_U64, VDF_END = 0, 1, 2, 7, 8
+
+
+def vdf_parse(data):
+    """Binary VDF → nested list of [type, key, value], in file order (unknown fields survive a rewrite)."""
+    pos = 0
+
+    def cstr():
+        nonlocal pos
+        end = data.index(b"\0", pos)
+        text, pos = data[pos:end].decode("utf-8", "replace"), end + 1
+        return text
+
+    def read_map():
+        nonlocal pos
+        out = []
+        while True:
+            kind = data[pos]
+            pos += 1
+            if kind == VDF_END:
+                return out
+            key = cstr()
+            if kind == VDF_MAP:
+                out.append([kind, key, read_map()])
+            elif kind == VDF_STR:
+                out.append([kind, key, cstr()])
+            elif kind == VDF_INT:
+                out.append([kind, key, int.from_bytes(data[pos:pos + 4], "little")])
+                pos += 4
+            elif kind == VDF_U64:
+                out.append([kind, key, int.from_bytes(data[pos:pos + 8], "little")])
+                pos += 8
+            else:
+                raise ValueError(f"unknown field type {kind} in shortcuts.vdf")
+    try:
+        return read_map()
+    except (IndexError, ValueError) as err:
+        raise ValueError(f"shortcuts.vdf looks damaged ({err})") from None
+
+
+def vdf_dump(fields):
+    out = bytearray()
+    for kind, key, value in fields:
+        out += bytes([kind]) + key.encode() + b"\0"
+        if kind == VDF_MAP:
+            out += vdf_dump(value)
+        elif kind == VDF_STR:
+            out += value.encode() + b"\0"
+        elif kind == VDF_INT:
+            out += (value & 0xFFFFFFFF).to_bytes(4, "little")
+        elif kind == VDF_U64:
+            out += value.to_bytes(8, "little")
+    return bytes(out + bytes([VDF_END]))
+
+
+def vdf_get(fields, key):
+    return next((v for _k, name, v in fields if name.lower() == key.lower()), None)
+
+
+def steam_root():
+    for path in (os.path.join(HOME, ".steam", "steam"), os.path.join(DATA_HOME, "Steam"),
+                 os.path.join(HOME, ".var", "app", "com.valvesoftware.Steam", "data", "Steam")):
+        if os.path.isdir(os.path.join(path, "userdata")):
+            return os.path.realpath(path)
+    return None
+
+
+def steam_accounts():
+    """config folders of the Steam accounts that have signed in on this computer."""
+    root = steam_root()
+    if not root:
+        return []
+    users = os.path.join(root, "userdata")
+    return [os.path.join(users, d, "config") for d in sorted(os.listdir(users))
+            if d.isdigit() and d != "0" and os.path.isdir(os.path.join(users, d, "config"))]
+
+
+def steam_appid(exe, name):
+    """The id Steam gives a shortcut (and names its artwork after)."""
+    return zlib.crc32((exe + name).encode()) | 0x80000000
+
+
+def read_shortcuts(config):
+    try:
+        with open(os.path.join(config, "shortcuts.vdf"), "rb") as f:
+            root = vdf_parse(f.read())
+    except FileNotFoundError:
+        root = []
+    if vdf_get(root, "shortcuts") is None:
+        root.append([VDF_MAP, "shortcuts", []])
+    return root
+
+
+def has_steam_shortcut(config):
+    entries = vdf_get(read_shortcuts(config), "shortcuts")
+    return any((vdf_get(e, "exe") or "").strip('"') == STEAM_SCRIPT for _k, _n, e in entries)
+
+
+def steam_state():
+    """None when Steam isn't set up here, else 'done' (every account has the shortcut) or 'todo'."""
+    accounts = steam_accounts()
+    if not accounts:
+        return None
+    try:
+        return "done" if all(has_steam_shortcut(c) for c in accounts) else "todo"
+    except (OSError, ValueError):
+        return "todo"
+
+
+def has_gaming_mode():
+    """SteamOS and its look-alikes (Bazzite's Deck images, ChimeraOS) switch between Gaming and Desktop Mode."""
+    return " steamos " in os_ids() or bool(shutil.which("steamos-session-select"))
+
+
+def steam_running():
+    try:
+        with open(os.path.join(HOME, ".steam", "steam.pid")) as f:
+            pid = int(f.read().strip() or 0)
+        with open(f"/proc/{pid}/comm") as f:
+            if f.read().strip() == "steam":
+                return True
+    except (OSError, ValueError):
+        pass
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                if f.read().strip() == "steam":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def write_steam_script():
+    os.makedirs(MNM_HOME, exist_ok=True)
+    with open(STEAM_SCRIPT + ".tmp", "w", encoding="utf-8") as f:
+        f.write(f"""#!/bin/sh
+# mnm-steam 1 — Steam starts this for the "{STEAM_NAME}" library entry (written by MnM on Linux).
+# Steam hands the programs it starts its own runtime libraries and overlay; the launcher needs the
+# system's, so put those back, then start the launcher the same way the app-menu entry does.
+if [ -n "${{SYSTEM_PATH+x}}" ]; then export PATH="$SYSTEM_PATH"; fi
+if [ -n "${{SYSTEM_LD_LIBRARY_PATH:-}}" ]; then export LD_LIBRARY_PATH="$SYSTEM_LD_LIBRARY_PATH"; else unset LD_LIBRARY_PATH; fi
+unset LD_PRELOAD
+exec {shlex.quote(LAUNCH_SCRIPT)} "$@"
+""")
+    os.chmod(STEAM_SCRIPT + ".tmp", 0o755)
+    os.replace(STEAM_SCRIPT + ".tmp", STEAM_SCRIPT)
+
+
+def extract_icon(appimage):
+    """Copy the launcher's own icon out of the AppImage, for Steam. Returns its path or None."""
+    if not appimage or not os.access(appimage, os.X_OK):
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            subprocess.run([appimage, "--appimage-extract", "*.png"], cwd=tmp, timeout=60,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        root = os.path.join(tmp, "squashfs-root")
+        pngs = [os.path.join(root, n) for n in os.listdir(root) if n.lower().endswith(".png")] \
+            if os.path.isdir(root) else []
+        pngs = [p for p in pngs if os.path.isfile(p) and not os.path.islink(p)]
+        if not pngs:
+            return None
+        os.makedirs(MNM_HOME, exist_ok=True)
+        shutil.copyfile(max(pngs, key=os.path.getsize), STEAM_ICON)
+    return STEAM_ICON
+
+
+def make_steam_art(icon):
+    """Library pictures made from the launcher icon: {suffix: PNG bytes} for Steam's grid folder.
+    The icon sits on its own background colour, so it blends in. Empty if pictures can't be made."""
+    try:
+        import gi
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
+        src = GdkPixbuf.Pixbuf.new_from_file(icon)
+    except Exception:   # no GdkPixbuf or an unreadable icon: Steam then shows the name instead
+        return {}
+    if not src.get_has_alpha():
+        src = src.add_alpha(False, 0, 0, 0)
+    # Icons often have a thin frame: cut it off, then use the colour just inside it as the background
+    trim = max(1, min(src.get_width(), src.get_height()) // 24)
+    src = src.new_subpixbuf(trim, trim, src.get_width() - 2 * trim, src.get_height() - 2 * trim).copy()
+    pixels, stride = src.get_pixels(), src.get_rowstride()
+    at = 2 * stride + 2 * src.get_n_channels()
+    background = (pixels[at] << 24) | (pixels[at + 1] << 16) | (pixels[at + 2] << 8) | 0xFF
+    art = {}
+    # suffix → (width, height, icon size as a share of the shorter side)
+    for suffix, (w, h, share) in {"p": (600, 900, 0.7), "": (920, 430, 0.75), "_hero": (1920, 620, 0.7)}.items():
+        canvas = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, w, h)
+        canvas.fill(background)
+        size = int(min(w, h) * share)
+        scaled = src.scale_simple(size, size, GdkPixbuf.InterpType.HYPER)
+        scaled.copy_area(0, 0, size, size, canvas, (w - size) // 2, (h - size) // 2)
+        ok, data = canvas.save_to_bufferv("png", [], [])
+        if ok:
+            art[suffix] = bytes(data)
+    return art
+
+
+def add_to_steam(appimage):
+    """Write the launch script, then the shortcut and pictures for every Steam account. Steam must be closed."""
+    write_steam_script()
+    icon = extract_icon(appimage) or (STEAM_ICON if os.path.isfile(STEAM_ICON) else "")
+    art = make_steam_art(icon) if icon else {}
+    exe = f'"{STEAM_SCRIPT}"'
+    appid = steam_appid(exe, STEAM_NAME)
+    start_dir = os.path.dirname(appimage) if appimage else MNM_HOME
+    added = 0
+    for config in steam_accounts():
+        root = read_shortcuts(config)
+        entries = vdf_get(root, "shortcuts")
+        if not any((vdf_get(e, "exe") or "").strip('"') == STEAM_SCRIPT for _k, _n, e in entries):
+            index = max((int(k) + 1 for _t, k, _v in entries if k.isdigit()), default=0)
+            entries.append([VDF_MAP, str(index), [
+                [VDF_INT, "appid", appid], [VDF_STR, "appname", STEAM_NAME], [VDF_STR, "exe", exe],
+                [VDF_STR, "StartDir", f'"{start_dir}"'], [VDF_STR, "icon", icon], [VDF_STR, "ShortcutPath", ""],
+                [VDF_STR, "LaunchOptions", ""], [VDF_INT, "IsHidden", 0], [VDF_INT, "AllowDesktopConfig", 1],
+                [VDF_INT, "AllowOverlay", 1], [VDF_INT, "OpenVR", 0], [VDF_INT, "Devkit", 0],
+                [VDF_STR, "DevkitGameID", ""], [VDF_INT, "DevkitOverrideAppID", 0],
+                # "played just now", so it shows first on the Home screen instead of only under Library → Non-Steam
+                [VDF_INT, "LastPlayTime", int(time.time())],
+                [VDF_STR, "FlatpakAppID", ""], [VDF_STR, "sortas", ""], [VDF_MAP, "tags", []]]])
+            path = os.path.join(config, "shortcuts.vdf")
+            if os.path.exists(path):
+                shutil.copyfile(path, path + ".mnm-backup")
+            with open(path + ".tmp", "wb") as f:
+                f.write(vdf_dump(root))
+            os.replace(path + ".tmp", path)
+            added += 1
+        grid = os.path.join(config, "grid")
+        os.makedirs(grid, exist_ok=True)
+        for suffix, data in art.items():
+            target = os.path.join(grid, f"{appid}{suffix}.png")
+            if not os.path.exists(target):   # never replace pictures the player chose in Steam
+                with open(target, "wb") as f:
+                    f.write(data)
+    return added
+
+
+def close_steam(timeout=60):
+    """Ask Steam to exit and wait for it. True once it's closed."""
+    if not steam_running():
+        return True
+    subprocess.Popen(["steam", "-shutdown"], start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        time.sleep(1)
+        if not steam_running():
+            time.sleep(2)   # let it finish writing its files
+            return True
+    return False
+
+
+def start_steam():
+    subprocess.Popen(["steam"], start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def switch_to_gaming_mode():
+    tool = shutil.which("steamos-session-select")
+    if tool:
+        subprocess.Popen([tool, "gamescope"], start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        subprocess.Popen(["steamosctl", "switch-to-game-mode"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# ── the look: dark leather, iron and gold, like the game's own windows ─────────
+THEME_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache"), "mnm-on-linux", "theme-1")
+
+
+def cinzel_bytes():
+    import base64
+    if not CINZEL_FONT.startswith("@@"):
+        return base64.b64decode(CINZEL_FONT)
+    here = os.path.dirname(os.path.abspath(__file__))   # unbuilt dev copy
+    with open(os.path.join(here, "fonts", "Cinzel.ttf"), "rb") as f:
+        return f.read()
+
+
+def load_theme_font():
+    """Make Cinzel available to this program only (fontconfig "app font"; nothing is installed)."""
+    try:
+        import ctypes
+        path = os.path.join(THEME_DIR, "Cinzel.ttf")
+        if not os.path.isfile(path):
+            os.makedirs(THEME_DIR, exist_ok=True)
+            with open(path + ".tmp", "wb") as f:
+                f.write(cinzel_bytes())
+            os.replace(path + ".tmp", path)
+        fc = ctypes.CDLL("libfontconfig.so.1")
+        return bool(fc.FcConfigAppFontAddFile(None, path.encode()))
+    except Exception:   # no font: the theme falls back to the system's serif
+        return False
+
+
+def make_texture(name, width, height, pixel):
+    """Write a tileable texture once: pixel(x, y, rnd) -> (r, g, b). Returns its path or None."""
+    path = os.path.join(THEME_DIR, name)
+    if os.path.isfile(path):
+        return path
+    try:
+        import random
+        import gi
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf, GLib
+        rnd = random.Random(name)
+        data = bytearray()
+        for y in range(height):
+            for x in range(width):
+                data += bytes(max(0, min(255, int(v))) for v in pixel(x, y, rnd))
+        pix = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(bytes(data)), GdkPixbuf.Colorspace.RGB, False, 8,
+                                              width, height, width * 3)
+        os.makedirs(THEME_DIR, exist_ok=True)
+        pix.savev(path + ".tmp", "png", [], [])
+        os.replace(path + ".tmp", path)
+        return path
+    except Exception:
+        return None
+
+
+def value_noise(size, cells, rnd):
+    """Smooth tileable noise in 0..1 as a function (x, y)."""
+    grid = [[rnd.random() for _ in range(cells)] for _ in range(cells)]
+    step = size / cells
+
+    def at(x, y):
+        gx, gy = x / step, y / step
+        x0, y0 = int(gx) % cells, int(gy) % cells
+        x1, y1 = (x0 + 1) % cells, (y0 + 1) % cells
+        fx, fy = gx - int(gx), gy - int(gy)
+        fx, fy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+        top = grid[y0][x0] + (grid[y0][x1] - grid[y0][x0]) * fx
+        bottom = grid[y1][x0] + (grid[y1][x1] - grid[y1][x0]) * fx
+        return top + (bottom - top) * fy
+    return at
+
+
+def theme_textures():
+    """(leather, iron) texture paths, made on first start (about a second) and kept in ~/.cache."""
+    size = 160
+    seed = __import__("random").Random(7)
+    coarse, fine = value_noise(size, 10, seed), value_noise(size, 40, seed)
+
+    def leather(x, y, rnd):
+        # pebbled grain: fine cells over slow blotches, with a little speckle
+        n = 0.55 * coarse(x, y) + 0.45 * fine(x, y)
+        grain = 0.82 + 0.36 * n + rnd.uniform(-0.05, 0.05)
+        return 52 * grain, 34 * grain, 22 * grain
+
+    rows = [seed.uniform(-1, 1) for _ in range(64)]
+
+    def iron(x, y, rnd):
+        # brushed metal: streaks along the rows
+        v = 66 + 7 * rows[y % 64] + 5 * rows[(y + 17) % 64] * (0.5 + 0.5 * fine(x, y)) + rnd.uniform(-3, 3)
+        return v, v + 1, v + 4
+    return make_texture("leather.png", size, size, leather), make_texture("iron.png", 192, 64, iron)
+
+
+def theme_css(leather, iron):
+    uri = lambda path: f'url("file://{path}")' if path else "none"
+    serif = '"Cinzel", "Cormorant Garamond", "EB Garamond", "Noto Serif", "DejaVu Serif", serif'
+    rivets = ", ".join(["radial-gradient(circle, #d9d4c7 0px, #8a857a 1.5px, #3a3631 3px, transparent 4px)"] * 4)
+    return f"""
+    window, dialog, messagedialog, window.background {{
+        background-color: #2a1b11; background-image: {uri(leather)}; color: #eadcb8; }}
+    label {{ color: #eadcb8; }}
+    .mnm-title {{ font-family: {serif}; font-size: 1.5em; font-weight: bold; color: #e8b75a; letter-spacing: 1px;
+              text-shadow: 0 1px 0 #000000, 0 0 6px rgba(0, 0, 0, 0.9); }}
+    .section {{ font-family: {serif}; font-weight: bold; margin-top: 8px; color: #dcaa52; letter-spacing: 1px;
+                text-shadow: 0 1px 0 #000000; }}
+    .dim {{ opacity: 0.78; }}
+    .plate {{ padding: 10px 14px; border-radius: 5px; border: 2px solid #121010;
+              background-color: #3d3f43; background-image: {rivets}, {uri(iron)};
+              background-size: 14px 14px, 14px 14px, 14px 14px, 14px 14px, auto;
+              background-position: 0 0, 100% 0, 0 100%, 100% 100%, 0 0;
+              background-repeat: no-repeat, no-repeat, no-repeat, no-repeat, repeat;
+              box-shadow: inset 0 1px rgba(255, 255, 255, 0.22), inset 0 -1px rgba(0, 0, 0, 0.6),
+                          0 3px 8px rgba(0, 0, 0, 0.7); }}
+    .card, .banner {{ padding: 12px 16px; border-radius: 6px; border: 2px solid #4b4d51;
+              border-color: #6e7176 #34363a #26272a #55585c;
+              background-color: rgba(18, 11, 6, 0.62); background-image: {rivets};
+              background-size: 14px 14px; background-position: 0 0, 100% 0, 0 100%, 100% 100%;
+              background-repeat: no-repeat;
+              box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.75), 0 2px 5px rgba(0, 0, 0, 0.55); }}
+    .banner-ok {{ background-color: rgba(40, 70, 25, 0.55); }}
+    .banner-bad {{ background-color: rgba(90, 20, 12, 0.55); }}
+    .banner-busy {{ background-color: rgba(18, 11, 6, 0.62); }}
+    .banner-text {{ font-family: {serif}; font-weight: bold; font-size: 1.1em; color: #f0deb0; }}
+    .step-num {{ font-family: {serif}; font-weight: bold; font-size: 1.15em; min-width: 1.6em; color: #e8b75a; }}
+    .cmd {{ font-family: monospace; padding: 6px 9px; border-radius: 4px; color: #f1e4c2;
+            background-color: rgba(0, 0, 0, 0.45); border: 1px solid #5a4630; }}
+    .mark {{ font-weight: bold; min-width: 1.4em; }}
+    .ok {{ color: #a6d47a; }}
+    .bad {{ color: #ef7a5c; }}
+    .warn {{ color: #e8b75a; }}
+    .detail {{ font-family: monospace; font-size: 0.9em; opacity: 0.8; }}
+
+    button {{ font-family: {serif}; font-weight: bold; letter-spacing: 0.5px; color: #ecdcb4;
+              padding: 5px 14px; border-radius: 3px; border: 1px solid #101012; outline-color: #e8b75a;
+              background-color: #45474b; background-image: linear-gradient(to bottom, #73767b, #4a4c50 46%,
+              #303235 54%, #3d3f43);
+              box-shadow: inset 0 1px rgba(255, 255, 255, 0.28), inset 0 -1px rgba(0, 0, 0, 0.5),
+                          0 1px 3px rgba(0, 0, 0, 0.7);
+              text-shadow: 0 1px 0 #000000; }}
+    button:hover {{ background-image: linear-gradient(to bottom, #868a90, #585b60 46%, #3b3d41 54%, #4a4c50);
+                    color: #fff1cc; }}
+    button:active, button:checked {{ background-image: linear-gradient(to bottom, #2a2c2f, #3c3e42);
+                    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.8); }}
+    button:disabled {{ color: rgba(236, 220, 180, 0.4); background-image: linear-gradient(to bottom,
+                    #4a4b4e, #343538); box-shadow: none; }}
+    button label {{ color: inherit; }}
+    .primary, button.suggested-action {{ color: #2b1604; text-shadow: 0 1px 0 rgba(255, 228, 160, 0.55);
+              border-color: #3e2606; background-color: #b07a22;
+              background-image: linear-gradient(to bottom, #f0c76a, #c38b2c 46%, #9a6516 54%, #b37b22); }}
+    .primary:hover, button.suggested-action:hover {{ color: #1c0e02;
+              background-image: linear-gradient(to bottom, #ffd985, #d49b38 46%, #aa7220 54%, #c48a2c); }}
+    .primary:disabled, button.suggested-action:disabled {{ color: rgba(43, 22, 4, 0.5);
+              background-image: linear-gradient(to bottom, #8a744a, #6b5530); }}
+    button.play {{ font-size: 1.6em; padding: 10px 52px; border-width: 2px;
+             background-image: linear-gradient(to bottom, #ff9a3c, #e0560e 46%, #b23a06 54%, #d1500c);
+             color: #fff4dc; text-shadow: 0 1px 0 #4a1500, 0 0 6px rgba(0, 0, 0, 0.5); border-color: #3a1000; }}
+    button.play:hover {{ background-image: linear-gradient(to bottom, #ffb35c, #f06a1e 46%, #c44a0e 54%, #e0601a);
+                   color: #ffffff; }}
+    button.play:disabled {{ color: rgba(255, 244, 220, 0.45); background-image: linear-gradient(to bottom,
+                   #8a5a3a, #6a3a1e); }}
+
+    entry {{ color: #f1e4c2; background-color: rgba(0, 0, 0, 0.5); background-image: none;
+             border: 1px solid #6a5236; border-radius: 3px; box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.8); }}
+    entry:focus {{ border-color: #e8b75a; }}
+    switch {{ background-color: #1d140d; background-image: none; border: 1px solid #0d0907;
+              box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.9); }}
+    switch:checked {{ background-color: #a8701c; }}
+    switch slider {{ background-color: #6e7176; background-image: linear-gradient(to bottom, #9a9da2, #55585c);
+                     border: 1px solid #141416; }}
+    progressbar trough {{ background-color: rgba(0, 0, 0, 0.55); border: 1px solid #4b4d51; min-height: 10px; }}
+    progressbar progress {{ background-color: #c38b2c; background-image: linear-gradient(to bottom, #f0c76a,
+                            #a86f1c); border: none; min-height: 10px; }}
+    progressbar text {{ color: #eadcb8; }}
+    tooltip, tooltip.background {{ background-color: #1a120b; border: 1px solid #6a5236; color: #eadcb8; }}
+    """
+
+
 # ── what is running right now ───────────────────────────────────────────────────
 def running_state():
     """('game' | 'launcher' | None): reads only process names and the game's GAMEID, never arguments."""
@@ -538,28 +995,12 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
         else:
             Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider, priority)
 
-    CSS = """
-    .title { font-size: 1.5em; font-weight: bold; }
-    .dim { opacity: 0.7; }
-    .banner { padding: 12px 14px; border-radius: 8px; }
-    .banner-ok { background-color: alpha(#2ec27e, 0.18); }
-    .banner-bad { background-color: alpha(#e01b24, 0.16); }
-    .banner-busy { background-color: alpha(#3584e4, 0.14); }
-    .banner-text { font-weight: bold; font-size: 1.1em; }
-    .card { padding: 10px 12px; border-radius: 8px; background-color: alpha(currentColor, 0.05); }
-    .step-num { font-weight: bold; font-size: 1.1em; min-width: 1.6em; }
-    .cmd { font-family: monospace; padding: 6px 8px; border-radius: 6px; background-color: alpha(currentColor, 0.08); }
-    .section { font-weight: bold; margin-top: 8px; }
-    .mark { font-weight: bold; min-width: 1.4em; }
-    .ok { color: #26a269; }
-    .bad { color: #e01b24; }
-    .warn { color: #c88800; }
-    .detail { font-family: monospace; font-size: 0.9em; opacity: 0.8; }
-    .play { font-size: 1.6em; font-weight: bold; padding: 10px 48px; }
-    .primary { background-image: none; background-color: #2e7fd8; color: #ffffff; border-color: #2569b4; }
-    .primary:hover { background-color: #3a8de8; }
-    .primary:disabled { background-color: alpha(#2e7fd8, 0.35); color: alpha(#ffffff, 0.6); }
-    """
+
+    load_theme_font()
+    THEME = theme_textures()
+    settings_obj = Gtk.Settings.get_default()
+    if settings_obj is not None:   # unthemed bits (menus, file chooser) dark too, next to the leather
+        settings_obj.set_property("gtk-application-prefer-dark-theme", True)
 
     MARKS = {"ok": ("✓", "ok"), "bad": ("✗", "bad"), "warn": ("!", "warn"), "info": ("·", "dim")}
 
@@ -581,6 +1022,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             self.gpu_info = ("0", "", "")
             self.busy_action = None
             self.skip_update = False
+            self.skip_steam = False
             self.seen_optional = set()
             self.settings = load_settings()
 
@@ -593,10 +1035,10 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             for side in ("top", "bottom", "start", "end"):
                 getattr(outer, f"set_margin_{side}")(16)
             # Header: name on the left; Settings / Troubleshoot / About (or Back) on the right
-            header = box(False, 8)
+            header = box(False, 8, "plate")
             titles = box(True, 2)
             titles.set_hexpand(True)
-            append(titles, label("MnM on Linux", "title"))
+            append(titles, label("MnM on Linux", "mnm-title"))
             self.system = label("Set up, play and fix Monsters & Memories on Linux.", "dim")
             append(titles, self.system)
             append(header, titles)
@@ -747,7 +1189,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             append(page, self.step_count)
             self.note = label("", "ok")   # what the last step did ("✓ umu-run 1.4.4 is installed.")
             append(page, self.note)
-            self.step_box = box(True, 12)
+            self.step_box = box(True, 12, "card")
             append(page, self.step_box)
 
             self.play_box = box(True, 14)
@@ -763,6 +1205,16 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             append(self.play_box, label("Play opens the official launcher with the launcher fix and your Settings. "
                                         "Sign in, install or update the game there, then press its Play button.",
                                         "dim"))
+            steam_row = box(False, 8)
+            self.steam_btn = Gtk.Button(label="Add to Steam…")
+            self.steam_btn.set_tooltip_text("Add the game to your Steam library, to start it from Big Picture "
+                                            "or Gaming Mode")
+            self.steam_btn.connect("clicked", lambda *_: self.do_steam())
+            append(steam_row, self.steam_btn)
+            self.gaming_btn = Gtk.Button(label="Return to Gaming Mode")
+            self.gaming_btn.connect("clicked", lambda *_: self.do_gaming_mode())
+            append(steam_row, self.gaming_btn)
+            append(self.play_box, steam_row)
             links = box(False, 8)
             append(links, self.link_button("Game folder", lambda: self.game_folder()))
             append(links, self.link_button("Logs folder", MNM_HOME))
@@ -841,7 +1293,13 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                  {"todo": ("Open the launcher, sign in and press Install (about 7 GB). The game goes into "
                            "the folder next to the launcher. Come back here when it's done.",
                            "Open launcher", self.on_play)}),
+                ("steam", "Steam", "Add the game to Steam",
+                 {"todo": ("Adds “Monsters & Memories” to your Steam library, with its picture, so you can start "
+                           "it from Gaming Mode like any other game. Steam closes for a moment while it's added. "
+                           "No typing needed.", "Add to Steam", self.do_steam)}),
             ]
+            if "steam" not in self.steps:
+                rows = [r for r in rows if r[0] != "steam"]
             if "prefix" in self.steps:
                 rows.insert(0, ("prefix", "Repair", "Repair the game's Wine folder",
                                 {"damaged": ("Some Windows files Proton made for the game are empty (usually after a "
@@ -860,19 +1318,23 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             # step count doesn't change halfway through
             self.seen_optional |= {k for k in ("fuse", "userns") if state_of(k) != "done"}
             rows = [r for r in self.step_rows() if r[0] not in ("fuse", "userns") or r[0] in self.seen_optional]
-            pending = lambda k: state_of(k) != "done" and not (state_of(k) == "update" and self.skip_update)
+            pending = lambda k: state_of(k) != "done" and not (state_of(k) == "update" and self.skip_update) \
+                and not (k == "steam" and self.skip_steam)
             current = next((i for i, (k, *_r) in enumerate(rows) if pending(k)), None)
             self.trail.set_text("   ".join(("✓ " if not pending(k) else "● " if i == current else "○ ") + short
                                            for i, (k, short, *_r) in enumerate(rows)))
             self.play_box.set_visible(current is None)
+            self.step_box.set_visible(current is not None)
             if current is None:
                 self.step_count.set_text("Setup is complete.")
+                self.steam_btn.set_visible(steam_state() == "todo")
+                self.gaming_btn.set_visible(has_gaming_mode())
                 self.refresh_running()
                 return
             key, _short, title, states = rows[current]
             state = state_of(key)
             self.step_count.set_text(f"Step {current + 1} of {len(rows)}")
-            append(self.step_box, shown(label(title, "title")))
+            append(self.step_box, shown(label(title, "mnm-title")))
             text, button, action = states.get(state, states.get("todo", ("", None, None)))
             append(self.step_box, shown(label(text)))
             if key in ("fuse", "userns"):
@@ -896,6 +1358,10 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 other = Gtk.Button(label="I already have it: choose the file…")
                 other.connect("clicked", self.on_action, "appimage")
                 append(buttons, other)
+            if key == "steam":
+                later = Gtk.Button(label="Not now")
+                later.connect("clicked", lambda *_: (setattr(self, "skip_steam", True), self.refresh_setup()))
+                append(buttons, later)
             if key == "fix" and state == "update":
                 later = Gtk.Button(label="Not now")
                 later.connect("clicked", lambda *_: (setattr(self, "skip_update", True), self.refresh_setup()))
@@ -933,6 +1399,8 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
         def task_done(self, key, message, ok):
             event_log("setup-step", f"{key}: {'ok' if ok else 'failed'} | {message}")
             self.busy_action = None
+            if key == "steam":
+                self.steam_done(ok)
             if ok:
                 self.note.set_text("✓ " + message)
             else:
@@ -971,6 +1439,81 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
 
         def do_fix(self):
             self.confirm_fix()
+
+        def launcher_path(self):
+            """The launcher AppImage, for its icon (the check shows the path shortened)."""
+            if self.appimage:
+                return self.appimage
+            detail = self.steps.get("launcher", ("", ""))[1]
+            path = detail.replace("~", HOME, 1) if detail.startswith("~") else detail
+            if path and os.path.isfile(path):
+                return path
+            folder = os.path.dirname(path) if path else GAME_HOME
+            try:
+                found = [os.path.join(folder, n) for n in os.listdir(folder) if n.lower().endswith(".appimage")
+                         and n.lower().startswith("monstersandmemories")]
+            except OSError:
+                found = []
+            return max(found, key=os.path.getmtime) if found else None
+
+        def do_steam(self):
+            gaming = has_gaming_mode()
+            self.confirm("Add Monsters & Memories to Steam?",
+                         "Adds it to your Steam library as a non-Steam game, with its picture, so you can start it "
+                         + ("from Gaming Mode. " if gaming else "from Big Picture or your library. ")
+                         + "Steam closes for a moment while it's added"
+                         + (", and afterwards you can go straight back to Gaming Mode." if gaming
+                            else " and starts again afterwards.")
+                         + " Your other games and Steam settings aren't touched (a copy of the old shortcut list "
+                           "is kept as shortcuts.vdf.mnm-backup).",
+                         "Add to Steam", self.start_steam_task)
+
+        def start_steam_task(self):
+            appimage = self.launcher_path()
+            self.steam_was_running = steam_running()
+
+            def work(_progress):
+                if not close_steam():
+                    raise OSError("Steam didn't close. Close it yourself (Steam menu → Exit), then press "
+                                  "Add to Steam again")
+                added = add_to_steam(appimage)
+                return "Monsters & Memories is in your Steam library." if added else \
+                    "Monsters & Memories was already in your Steam library."
+            self.run_task("steam", work, "{result}")
+
+        def steam_done(self, ok):
+            """After Add to Steam: back to Gaming Mode, or start Steam again on a desktop."""
+            if not ok:
+                if self.steam_was_running:
+                    start_steam()
+                return
+            if has_gaming_mode():
+                dialog = Gtk.MessageDialog(transient_for=self.win, modal=True,
+                                           message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.NONE,
+                                           text="Added to Steam")
+                dialog.set_property("secondary-text",
+                                    "Go back to Gaming Mode now? Monsters & Memories is first on the Home screen "
+                                    "(and under Library → Non-Steam). Start it and press Play in the launcher; if it "
+                                    "asks you to sign in again, STEAM + X opens the keyboard.")
+                dialog.add_button("Stay in Desktop Mode", Gtk.ResponseType.CANCEL)
+                dialog.add_button("Return to Gaming Mode", Gtk.ResponseType.OK)
+
+                def response(d, r):
+                    event_log("confirm", f"gaming mode after steam -> {'OK' if r == Gtk.ResponseType.OK else 'stay'}")
+                    d.destroy()
+                    if r == Gtk.ResponseType.OK:
+                        switch_to_gaming_mode()
+                    elif self.steam_was_running:
+                        start_steam()
+                dialog.connect("response", response)
+                dialog.present()
+            elif self.steam_was_running:
+                start_steam()
+
+        def do_gaming_mode(self):
+            self.confirm("Return to Gaming Mode?", "Closes the desktop (and this window) and goes back to Gaming "
+                         "Mode. Monsters & Memories is in your Steam library under Library → Non-Steam.",
+                         "Return to Gaming Mode", switch_to_gaming_mode)
 
         def do_repair(self):
             prefix = self.steps["prefix"][1]
@@ -1172,7 +1715,8 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             append(page, links)
             append(page, label("What it downloads, only when you press the button: the official launcher from the "
                                "Monsters & Memories download page, and umu-launcher (GPL-3.0) from its GitHub page. "
-                               "MnM on Linux itself is MIT licensed.", "dim"))
+                               "MnM on Linux itself is MIT licensed. The Cinzel font is under the SIL Open Font "
+                               "License 1.1.", "dim"))
             self.update_asset = None
             return page
 
@@ -1336,6 +1880,9 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             self.show_fixes()
             if self.new_steps:
                 self.steps = self.new_steps
+                steam = steam_state()
+                if steam and (has_gaming_mode() or steam == "done"):   # a setup step where there's a Gaming Mode
+                    self.steps["steam"] = (steam if has_gaming_mode() else "done", "")
                 self.refresh_setup()
                 self.refresh_settings()
                 self.refresh_running()
@@ -1536,7 +2083,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
         if windows:
             windows[0].win.present()
             return
-        load_css(CSS)
+        load_css(theme_css(*THEME))
         windows.append(Window(application))
 
     app.connect("activate", activate)

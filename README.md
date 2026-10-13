@@ -29,6 +29,7 @@ In order, skipping any that are already done (a line at the bottom shows ✓ don
 3. **Install umu-run**: its single-file version into `~/.local/bin`, no password.
 4. **Apply the launcher fix** (or **Update fix** if you have an older one).
 5. **Install the game**: opens the launcher; sign in and press Install there.
+6. **Add the game to Steam**, on a Steam Deck (and other systems with a Gaming Mode): see [Steam Deck](#steam-deck). On other computers with Steam, an optional **Add to Steam…** button sits under Play instead.
 
 If the game's Wine folder is damaged (empty system files after a crash during the first start), a **Repair** step comes first. Then the window shows **Play**, which opens the official launcher with the launcher fix and your Settings, and shows whether the launcher or game is running.
 
@@ -54,6 +55,18 @@ The buttons at the top open the other pages; **← Back** returns to the steps:
 **Launch options** work like Steam's: `VARIABLE=value` settings, then `%command%`, then arguments for the game, for example `%command% -popupwindow` (borderless window), `DXVK_HUD=fps %command%` or `PROTON_LOG=1 %command%`. Don't add `--token`: the launcher already passes its own, and the window warns about it. A command before `%command%` (such as `taskset -c 0-3`) runs the game through it. Below the box, the window shows what the options will do. They need the launcher fix from v2.1.0 on; with an older one, the window offers **Update fix**.
 
 Upgrading from the old **Linux Check** (v1)? Press **Update fix** when the window shows it so the wrapper uses your Settings. The old fix keeps working until then.
+
+## Steam Deck
+
+Everything is done with taps, in Desktop Mode (hold the power button → **Switch to Desktop**):
+
+1. Open the browser, go to the [latest release](../../releases/latest) and download **`mnm-on-linux.py`**.
+2. In the Downloads folder, tap and hold the file → **Properties** → **Permissions** → tick **Is executable** → OK. Then open it.
+3. Go through the steps. Sign in and install the game in the launcher while you're still in Desktop Mode (the keyboard is easier there).
+4. **Add to Steam** adds "Monsters & Memories" to your Steam library with its picture. Steam closes for a moment while it's added (a copy of the old shortcut list is kept as `shortcuts.vdf.mnm-backup`), then the window offers **Return to Gaming Mode**.
+5. In Gaming Mode it's first on the Home screen (and under **Library → Non-Steam**). Start it and press Play in the launcher. If the launcher asks you to sign in again, **STEAM + X** opens the keyboard.
+
+Steam starts the launcher through `~/.local/share/mnm/mnm-steam.sh`, which gives it the system's libraries instead of Steam's, then runs the same launch script as the app-menu entry, so your Settings apply in Gaming Mode too. The library pictures are made from the launcher's own icon, and pictures you've set yourself in Steam are never replaced.
 
 ## What it checks
 
@@ -99,6 +112,10 @@ The check never shows personal data. Paths in your home folder appear as `~/…`
 
 **Copy report** and `--report` run the whole report through the same filter again before you share it. A report keeps what's useful for fixing problems: your distro, GPU models, and driver, Proton and umu versions.
 
+## Look
+
+The window is styled after the game's own windows: dark leather, iron and gold. Headings use the Cinzel font (SIL Open Font License 1.1, see `gui/fonts/OFL.txt`), which is built into the file and only loaded for this window; nothing is installed. The leather and iron textures are made on first start and kept in `~/.cache/mnm-on-linux`.
+
 ## Building
 
-`mnm-linux-check.sh` holds the checks and `gui/mnm_check_gui.py` holds the window. Run `./build.sh` to combine them into the single file `dist/mnm-on-linux.py`.
+`mnm-linux-check.sh` holds the checks and `gui/mnm_check_gui.py` holds the window. Run `./build.sh` to combine them (and the Cinzel font) into the single file `dist/mnm-on-linux.py`.

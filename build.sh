@@ -13,7 +13,12 @@ if "'''" in script or script.endswith("\\"):
 gui = Path("gui/mnm_check_gui.py").read_text()
 marker = "r'''@@CHECK_SCRIPT@@'''"
 assert gui.count(marker) == 1
-Path("dist/mnm-on-linux.py").write_text(gui.replace(marker, "r'''" + script + "'''"))
+gui = gui.replace(marker, "r'''" + script + "'''")
+import base64
+font = '"@@CINZEL_FONT@@"'
+assert gui.count(font) == 1
+gui = gui.replace(font, '"' + base64.b64encode(Path("gui/fonts/Cinzel.ttf").read_bytes()).decode() + '"')
+Path("dist/mnm-on-linux.py").write_text(gui)
 EOF
 chmod +x dist/mnm-on-linux.py
 python3 -m py_compile dist/mnm-on-linux.py
