@@ -60,6 +60,8 @@ Upgrading from the old **Linux Check** (v1)? Press **Update fix** when the windo
 
 Everything is done with taps, in Desktop Mode (hold the power button → **Switch to Desktop**):
 
+![The Add to Steam step](docs/screenshot-steam.png)
+
 1. Open the browser, go to the [latest release](../../releases/latest) and download **`mnm-on-linux.py`**.
 2. In the Downloads folder, tap and hold the file → **Properties** → **Permissions** → tick **Is executable** → OK. Then open it.
 3. Go through the steps. Sign in and install the game in the launcher while you're still in Desktop Mode (the keyboard is easier there).
