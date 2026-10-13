@@ -331,7 +331,7 @@ for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
   break
 done
 PANGO_SEEN=0; grep -qs 'undefined symbol: hb_ot_layout_get_horizontal_baseline_tag_for_script' "$MNM_HOME/launcher.log" && PANGO_SEEN=1
-LAUNCH_OK='^# mnm-launch [23]'; [ $OLD_HARFBUZZ = 1 ] && LAUNCH_OK='^# mnm-launch 3'
+LAUNCH_OK='^# mnm-launch [234]'; [ $OLD_HARFBUZZ = 1 ] && LAUNCH_OK='^# mnm-launch [34]'
 # Launch options from the window's Settings need "mnm-wrapper 3"; without them version 2 is still fine.
 WRAP_OK='^# mnm-wrapper [23]'; LAUNCH_OPTS=0
 grep -qs '^MNM_\(ENV\|PRE\|ARG\)=' "${XDG_CONFIG_HOME:-$HOME/.config}/mnm-on-linux/settings.conf" && { WRAP_OK='^# mnm-wrapper 3'; LAUNCH_OPTS=1; }
@@ -360,6 +360,22 @@ if [ -z "$UMU" ] || ! is_wrapper "$UMU"; then   # also when umu-run is still mis
   fi
 elif [ $WRAPPER_INSTALLED = 1 ] && [ -z "$LAUNCHER_PID" ]; then
   info "Start the launcher from your app menu: “Monsters & Memories” (that entry uses the launcher fix)"
+fi
+
+# The launch script looks for the launcher in the folder it was in when the fix was applied. If it has
+# moved (or another copy was chosen), launch scripts before "mnm-launch 4" find nothing and quit silently.
+LAUNCH_DIR_WRONG=0
+if [ -n "$APPIMAGE" ] && [ -f "$MNM_HOME/mnm-launcher.sh" ]; then
+  LAUNCH_DIR=$(sed -n 's/^APP=$(find "\(.*\)" -maxdepth 1 .*/\1/p' "$MNM_HOME/mnm-launcher.sh" | head -1)
+  if [ -n "$LAUNCH_DIR" ] && [ "$(readlink -f "$LAUNCH_DIR")" != "$(readlink -f "$(dirname "$APPIMAGE")")" ]; then
+    if find "$LAUNCH_DIR" -maxdepth 1 -iname 'MonstersAndMemories*.appimage' 2>/dev/null | grep -q .; then
+      warn "The launch script starts the launcher in $(tilde "$LAUNCH_DIR"), not the one in $(tilde "$(dirname "$APPIMAGE")")"
+    else
+      LAUNCH_DIR_WRONG=1   # the app-menu entry can't start anything: the window makes "Update fix" a required step
+      bad "The launch script looks for the launcher in $(tilde "$LAUNCH_DIR"), but it isn't there any more (it's in $(tilde "$(dirname "$APPIMAGE")")), so the app-menu entry does nothing"
+    fi
+    fix "$SELF --fix$([ -n "$APPIMAGE_ARG" ] && echo " --appimage $(shpath "$APPIMAGE")")   (points the launch script at $(tilde "$(dirname "$APPIMAGE")"); nothing else changes)"
+  fi
 fi
 
 # Launch scripts written by --fix before v1.1 matched only lowercase ".appimage"
@@ -633,9 +649,18 @@ EOF
     LAUNCH=$MNM_HOME/mnm-launcher.sh
     cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
-# mnm-launch 3 — starts the Monsters & Memories launcher with the umu-run wrapper first in PATH,
+# mnm-launch 4 — starts the Monsters & Memories launcher with the umu-run wrapper first in PATH,
 # saving its output to launcher.log (written by MnM on Linux / mnm-linux-check.sh).
 APP=\$(find "$(dirname "$APPIMAGE")" -maxdepth 1 -iname 'MonstersAndMemories*.appimage' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+# Moved since the fix was applied? Look in the usual folders too, rather than doing nothing.
+[ -n "\$APP" ] || APP=\$(find "\$HOME/Games/MonstersAndMemories" "\$HOME/Applications" "\$HOME/Downloads" "\$HOME/Desktop" "\$HOME/Games" "\$HOME/.local/bin" "\$HOME" /opt \\
+  -maxdepth 1 -iname 'MonstersAndMemories*.appimage' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+if [ -z "\$APP" ]; then
+  msg="Can't find the Monsters & Memories launcher (MonstersAndMemories*.AppImage) in $(dirname "$APPIMAGE") or the usual folders. Open MnM on Linux and choose where it is."
+  echo "mnm-launch: \$msg" >> "$MNM_HOME/launcher.log"
+  command -v notify-send >/dev/null && notify-send -a "Monsters & Memories" "Launcher not found" "\$msg"
+  exit 1
+fi
 # ~/.local/bin (where MnM on Linux installs umu-run) is only on PATH after a re-login on some distros
 export PATH="$WRAP_DIR:\$PATH:\$HOME/.local/bin"
 # The launcher AppImage bundles an old libwayland-client. Newer Mesa (Fedora 44, Bazzite…) can't use it,
@@ -860,7 +885,8 @@ if [ "$GUI" = 1 ]; then
   if [ $USERNS_OK = 1 ]; then step userns done; else step userns todo "$USERNS_CMD"; fi
   if have umu-run || [ -x "$HOME/.local/bin/umu-run" ] || [ -n "$UMU" ]; then step umu done "${UMU_VERSION:-$(umu-run --version 2>/dev/null | grep -io 'version [0-9.]*' | head -1)}"   # the copy the launcher uses
   else step umu todo; fi
-  if [ $WRAPPER_CURRENT = 1 ]; then step fix done
+  if [ $WRAPPER_INSTALLED = 1 ] && [ $LAUNCH_DIR_WRONG = 1 ]; then step fix moved "$(tilde "$(dirname "$APPIMAGE")")"
+  elif [ $WRAPPER_CURRENT = 1 ]; then step fix done
   elif [ $WRAPPER_INSTALLED = 1 ] && [ $OLD_HARFBUZZ = 1 ]; then step fix needed   # the old fix can't start the launcher here
   elif [ $WRAPPER_INSTALLED = 1 ]; then step fix update; else step fix todo; fi
   if [ -n "$GAME_DIR" ] && [ -f "$GAME_DIR/mnm.exe" ]; then step game done "$(tilde "$GAME_DIR")"; else step game todo; fi

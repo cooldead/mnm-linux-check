@@ -36,7 +36,7 @@ CHECK_SCRIPT = r'''@@CHECK_SCRIPT@@'''
 CINZEL_FONT = "@@CINZEL_FONT@@"
 
 APP_NAME = "MnM on Linux"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"
 TITLE = APP_NAME
 APP_ID = "io.github.mnm.LinuxCheck"
 REPO = "cooldead/mnm-linux-check"
@@ -229,13 +229,14 @@ def parse_launch_options(text):
 def load_settings():
     settings = {key: values[0] for key, values in SETTINGS_CHOICES.items()}
     settings["MNM_LAUNCH_OPTIONS"] = ""
+    settings["MNM_APPIMAGE"] = ""   # a launcher chosen with "Choose AppImage…", remembered between starts
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as f:
             for line in f:
                 key, _, value = line.rstrip("\n").partition("=")
                 if value in SETTINGS_CHOICES.get(key, ()):
                     settings[key] = value
-                elif key == "MNM_LAUNCH_OPTIONS":
+                elif key in ("MNM_LAUNCH_OPTIONS", "MNM_APPIMAGE"):
                     settings[key] = value
     except OSError:
         pass
@@ -254,6 +255,8 @@ def save_settings(settings):
         # wrapper, so it never has to parse quotes: MNM_ENV = variable, MNM_PRE = command the game
         # runs through, MNM_ARG = argument for the game.
         f.write(f"MNM_LAUNCH_OPTIONS={settings.get('MNM_LAUNCH_OPTIONS', '')}\n")
+        if settings.get("MNM_APPIMAGE"):
+            f.write(f"MNM_APPIMAGE={settings['MNM_APPIMAGE']}\n")
         for kind, words in (("MNM_ENV", env), ("MNM_PRE", pre), ("MNM_ARG", args)):
             for word in words:
                 f.write(f"{kind}={word}\n")
@@ -1025,6 +1028,8 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             self.skip_steam = False
             self.seen_optional = set()
             self.settings = load_settings()
+            if os.path.isfile(self.settings.get("MNM_APPIMAGE", "")):
+                self.appimage = self.settings["MNM_APPIMAGE"]
 
             self.win = Gtk.ApplicationWindow(application=app, title=TITLE)
             self.win.set_default_size(760, 560)
@@ -1285,6 +1290,10 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                   "update": ("Your launcher fix is an older version. Update it so your Settings are used and the "
                              "launcher window doesn't stay white on newer distros.",
                              "Update fix", self.do_fix),
+                  "moved": ("Required: the launcher fix still looks for the launcher in the folder it used to be "
+                            "in, so the “Monsters & Memories” app-menu entry does nothing. Update it to use the "
+                            f"launcher in {self.steps.get('fix', ('', ''))[1] or 'its new folder'}.",
+                            "Update fix", self.do_fix),
                   "needed": ("Required: your launcher fix is an older version, and on this system the launcher "
                              "can't start without the new one (its bundled text library needs a newer HarfBuzz "
                              "than your system has, so it quits at once).",
@@ -2073,6 +2082,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
             event_log("appimage-chosen", path or "(cancelled)")
             if path:
                 self.appimage = path
+                self.set_setting("MNM_APPIMAGE", path)   # remembered, so the next start uses it too
                 self.run([])
 
     flags = getattr(Gio.ApplicationFlags, "DEFAULT_FLAGS", Gio.ApplicationFlags.FLAGS_NONE)
