@@ -58,7 +58,7 @@ Upgrading from the old **Linux Check** (v1)? Press **Update fix** when the windo
 
 ## Steam Deck
 
-Everything is done with taps, in Desktop Mode (hold the power button → **Switch to Desktop**):
+Everything is done with taps, in Desktop Mode (press the **STEAM** button → **Power** → **Switch to Desktop**):
 
 ![The Add to Steam step](docs/screenshot-steam.png)
 
