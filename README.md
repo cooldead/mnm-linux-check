@@ -81,6 +81,114 @@ Steam starts the launcher through `~/.local/share/mnm/mnm-steam.sh`, which gives
 7. Errors in the launcher's last log
 8. Python and PyGObject/GTK
 
+## What it runs
+
+This section lists every command the tool runs and every file it writes. The window keeps the checks in a temporary copy of `mnm-linux-check.sh`, runs it with `bash`, and deletes the copy when the run finishes.
+
+### The check (read-only)
+
+**Check again**, the terminal check and the start of every other button run these. None of them changes anything.
+
+| Command or file read | Why |
+| --- | --- |
+| `uname -m` | Is the CPU 64-bit x86? |
+| `/etc/os-release`, `/etc/mx-version` | Your distro, so the fix commands are the right ones for it |
+| `/sys/class/drm/card*/device/vendor`, `/sys/class/power_supply/BAT*` | Which GPUs you have, and whether it's a laptop |
+| `pgrep -x mnm_launcher`, then the launcher's `/proc/<pid>/environ` | Is the launcher open, and which AppImage and `PATH` is it using? |
+| `find ~/Games/MonstersAndMemories ~/Applications ~/Downloads ~/Desktop ~/Games ~/.local/bin ~ /opt -maxdepth 1 -iname 'MonstersAndMemories*.appimage'` | Finds the launcher (the newest one wins) |
+| `ldconfig -p` (also tries `/sbin/ldconfig`) | Is FUSE 2 (`libfuse.so.2`) installed? Is the Vulkan loader (`libvulkan.so.1`)? |
+| `head -c2 mnm.exe` | Is `mnm.exe` a real Windows program? (It starts with `MZ`.) |
+| `grep` in `~/.local/share/applications/*.desktop` | Finds the launcher's app-menu entry |
+| `systemctl --user show-environment` | The `PATH` your desktop gives the launcher, which can differ from your terminal's |
+| `umu-run --version` (stops after 30 s) | Does `umu-run` actually run? |
+| `curl https://api.github.com/repos/Open-Wine-Components/umu-launcher/releases/latest` | Only when `umu-run` is missing or broken: gets the newest version number for the install command it shows |
+| `grep` in `~/.xsession-errors` and `~/.local/share/mnm/launcher.log` | Known crash messages (`No module named 'encodings'`, white window, Pango) |
+| `grep -qa hb_ot_layout_get_horizontal_baseline_tag_for_script libharfbuzz.so.0` | Is your HarfBuzz too old for the launcher's Pango? (Ubuntu 22.04 and distros based on it.) |
+| `/proc/sys/kernel/unprivileged_userns_clone`, `/proc/sys/user/max_user_namespaces` | Can Proton's sandbox start? |
+| `ls` of `compatibilitytools.d/GE-Proton*` and `~/.local/share/umu/steamrt*` | Are GE-Proton and the Steam Linux Runtime downloaded? |
+| `ls /usr/share/vulkan/icd.d /etc/vulkan/icd.d` | Is there a Vulkan driver for each GPU? Is AMDVLK installed? |
+| `vulkaninfo --summary` (if installed, stops after 20 s) | Which GPUs Vulkan can see |
+| `prime-select query` (if installed) and `/proc/driver/nvidia/version` | On NVIDIA laptops: is the NVIDIA driver loaded and switched on? |
+| `find` for empty `.dll`/`.exe` files in the prefix's `system32` and `syswow64` | Is the game's Wine folder damaged? |
+| `python3`, then `import gi` with GTK 4 or 3 | Can the window open? |
+
+### Buttons that change something
+
+Each one asks you to confirm first.
+
+| Button | What it runs | What changes |
+| --- | --- | --- |
+| Download (Get the official launcher) | Downloads `MonstersAndMemories_amd64.AppImage` from the official download link (saved as a `.part` file until it's complete), then makes it executable | New file in `~/Games/MonstersAndMemories` |
+| Choose AppImage… | Nothing | Saves the path as `MNM_APPIMAGE` in `settings.conf` |
+| Make runnable | Same as `chmod +x` on the AppImage | The AppImage's permissions |
+| Install umu-run | Asks GitHub for the newest umu-launcher release (1.4.4 if that fails), downloads `umu-launcher-<version>-zipapp.tar` and unpacks only `umu/umu-run` | New file `~/.local/bin/umu-run` |
+| Apply launcher fix / Update fix | `bash mnm-linux-check.sh --fix` | See [What the launcher fix installs](#what-the-launcher-fix-installs) |
+| Repair | Renames the game's Wine folder | `~/.local/share/mnm/mnm/pfx` becomes `pfx.broken-<date>-<time>`, and a fresh one is made on the next Play |
+| Test Proton | `--test`: runs `umu-run <prefix>/drive_c/windows/system32/cmd.exe /c "echo MNM_LINK_OK> C:\mnm-link-test.txt"` with the launcher's settings (`WINEPREFIX`, `GAMEID=umu-monstersandmemories`, `PROTONPATH=GE-Proton`, `PROTON_VERB=run`). It stops after 15 minutes. In a new prefix it first runs `umu-run ""` to create the prefix. It's skipped while the game is running | The test file, which it deletes afterwards. The first run may download GE-Proton and the Steam Linux Runtime |
+| Watch for Play | `--watch`: every 2 s, `pgrep -u <you> -f 'mnm\.exe'`. Then it reads the game's program name and environment (`GAMEID`, prefix, `PROTONPATH`, GPU offload settings), the GPU devices it has open (`/proc/<pid>/fd`) and the `Renderer:` line in `Player.log`. It never reads the game's arguments, which hold your login token | Nothing |
+| Play | `~/.local/share/mnm/mnm-launcher.sh` | Nothing |
+| Settings → Save | Nothing | Writes `~/.config/mnm-on-linux/settings.conf` |
+| Add to Steam | Writes `~/.local/share/mnm/mnm-steam.sh`. Runs `<AppImage> --appimage-extract '*.png'` in a temporary folder and keeps the largest icon as `~/.local/share/mnm/icon.png`, then makes three library pictures from it. Runs `steam -shutdown` and waits up to 60 s. Afterwards runs `steam` to restart it, or **Return to Gaming Mode** runs `steamos-session-select gamescope` (or `steamosctl switch-to-game-mode`) | For each Steam account in `userdata/<id>/config` (under `~/.steam/steam`, `~/.local/share/Steam` or the Flatpak's Steam folder): `shortcuts.vdf` is copied to `shortcuts.vdf.mnm-backup` and gets a "Monsters & Memories" entry (skipped if it already has one). `grid/<appid>p.png`, `<appid>.png` and `<appid>_hero.png` are written unless they already exist |
+| About → Update | Downloads `mnm-on-linux.py` from the latest release to `mnm-on-linux.py.new`, checks that it's a complete Python file, then restarts into it | Replaces the file you started |
+| Links | Your default browser (`xdg-open`) | Nothing |
+
+On first start the window writes its font (Cinzel) and leather and iron textures to `~/.cache/mnm-on-linux/theme-1`. Nothing is installed. If GTK is missing and there's no terminal, it explains why with `kdialog`, `zenity` or `notify-send`, whichever it finds first.
+
+### What the launcher fix installs
+
+`--fix` writes two scripts and points the app-menu entry at the second one. Everything stays in your home folder.
+
+**1. `~/.local/share/mnm/bin/umu-run`** ("mnm-wrapper 3"). The launcher runs this in place of the real `umu-run` every time you press Play. It:
+
+- runs `unset PYTHONHOME PYTHONPATH LD_LIBRARY_PATH LD_PRELOAD GTK_DATA_PREFIX GTK_THEME GTK_EXE_PREFIX GTK_PATH GTK_IM_MODULE_FILE GDK_PIXBUF_MODULE_FILE GDK_BACKEND GIO_EXTRA_MODULES GSETTINGS_SCHEMA_DIR`. These are the AppImage's own settings, and they crash `umu-run`.
+- removes the AppImage's folders from `PATH` and `XDG_DATA_DIRS`, and unsets `APPDIR APPIMAGE ARGV0 OWD`
+- reads `settings.conf` and sets:
+
+  | Setting | Variable |
+  | --- | --- |
+  | Graphics card (two GPUs; "auto" only on laptops) | NVIDIA: `__NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only __GLX_VENDOR_LIBRARY_NAME=nvidia`; AMD/Intel: `DRI_PRIME=1` |
+  | WineD3D | `PROTON_USE_WINED3D=1` |
+  | Native Wayland | `PROTON_ENABLE_WAYLAND=1` |
+  | HDR | `PROTON_ENABLE_WAYLAND=1 PROTON_ENABLE_HDR=1` |
+  | MangoHud (if installed) | `MANGOHUD=1` |
+  | GameMode (if installed) | runs the game through `gamemoderun` |
+  | Launch options | `VAR=value` exported last, so they win. A command before `%command%` goes in front (skipped if it isn't installed). Arguments go after the launcher's own. The options are logged with `--token` hidden |
+
+- then runs `exec [launch-option command] [gamemoderun] <real umu-run> <launcher's arguments> [your arguments]`
+
+**2. `~/.local/share/mnm/mnm-launcher.sh`** ("mnm-launch 4"). The app-menu entry, Play and Steam all start this. It:
+
+- finds the newest `MonstersAndMemories*.AppImage` in the folder you set up with, falling back to the usual folders. If there's none, it writes that to the log, shows a `notify-send` message and stops
+- sets `PATH=~/.local/share/mnm/bin:$PATH:~/.local/bin`, so the launcher finds the wrapper first
+- `LD_PRELOAD`s the system's `libwayland-client.so.0`, because the AppImage's own copy gives a white window on new Mesa. `MNM_NO_WAYLAND_PRELOAD=1` skips this
+- with an old HarfBuzz only: `LD_PRELOAD`s the system's `libpangocairo`, `libpangoft2` and `libpango`. `MNM_NO_PANGO_PRELOAD=1` skips this
+- moves `launcher.log` to `launcher.log.old` once it's over 5 MB, then runs the launcher with its output added to `~/.local/share/mnm/launcher.log`
+
+**3. The app-menu entry.** If the launcher already has one in `~/.local/share/applications`, its `Exec=` line is changed to the launch script, and the original is copied once to `~/.local/share/mnm/desktop-entry.backup`. If it has none, `mnm-launcher.desktop` is created. Then `update-desktop-database ~/.local/share/applications` runs, if you have it.
+
+To undo the fix, delete `~/.local/share/mnm/bin/umu-run` and `~/.local/share/mnm/mnm-launcher.sh`, then copy `desktop-entry.backup` back over the menu entry, or delete `mnm-launcher.desktop`.
+
+**Steam's script, `~/.local/share/mnm/mnm-steam.sh`** ("mnm-steam 1"), is written only by Add to Steam. It puts back the system's `PATH` and `LD_LIBRARY_PATH` (Steam passes its own), unsets `LD_PRELOAD`, and runs the launch script.
+
+### Commands it only shows
+
+The tool never runs these. They need your password or change your system, so the window shows each one with a **Copy** button, and the terminal check prints them.
+
+| When | Command (Arch / Fedora / Debian and Ubuntu / openSUSE) |
+| --- | --- |
+| FUSE 2 missing | `sudo pacman -S --needed fuse2` / `sudo dnf install fuse-libs` / `sudo apt install libfuse2t64` (`libfuse2` on Debian 12, Ubuntu 22.04 and older) / `sudo zypper install libfuse2` |
+| User namespaces off | `echo kernel.unprivileged_userns_clone=1 \| sudo tee /etc/sysctl.d/90-mnm-userns.conf && sudo sysctl -w kernel.unprivileged_userns_clone=1` (or the same with `user.max_user_namespaces=15000`) |
+| umu-run missing (terminal check) | `sudo pacman -S --needed umu-launcher` / `sudo dnf install umu-launcher` / on Debian 12–13 and Ubuntu 24.04, `wget` of the two umu-launcher `.deb` files from GitHub, then `sudo apt install ./…deb ./…deb`. Elsewhere, and on SteamOS and Bazzite: the zipapp into `~/.local/bin`, without `sudo` |
+| umu-run not on the desktop's `PATH` | `mkdir -p ~/.config/environment.d && echo 'PATH=<its folder>:${PATH}' >> ~/.config/environment.d/mnm.conf`, then log out and back in |
+| AppImage not executable (terminal check) | `chmod +x <AppImage>` |
+| Vulkan loader missing | `vulkan-icd-loader lib32-vulkan-icd-loader` / `vulkan-loader` / `libvulkan1` / `libvulkan1` |
+| No Vulkan driver | NVIDIA: `sudo pacman -S --needed nvidia-utils lib32-nvidia-utils` / `sudo dnf install akmod-nvidia xorg-x11-drv-nvidia-libs.i686` (RPM Fusion) / `sudo ubuntu-drivers install`. AMD: `vulkan-radeon lib32-vulkan-radeon` / `mesa-vulkan-drivers mesa-vulkan-drivers.i686` / `mesa-vulkan-drivers` / `libvulkan_radeon`. Intel: the same with `intel` |
+| AMDVLK installed | `sudo pacman -R amdvlk lib32-amdvlk` / `sudo dnf remove amdvlk` / `sudo apt remove amdvlk` / `sudo zypper remove amdvlk` |
+| NVIDIA GPU switched off | `sudo prime-select on-demand`, then reboot |
+| Damaged prefix (terminal check) | `mv ~/.local/share/mnm/mnm/pfx ~/.local/share/mnm/mnm/pfx.broken-<date>` |
+| Python, PyGObject or GTK missing | See [Requirements](#requirements) |
+| MangoHud or GameMode missing (Settings) | Your distro's install command. On Bazzite and other image-based systems it's `rpm-ostree install …`, then restart |
+
 ## Requirements
 
 Python 3 (`umu-run` needs it too) plus PyGObject with GTK 4 or 3 for the window. GNOME, Ubuntu, Linux Mint, Fedora, Bazzite and SteamOS usually have these already. If they're missing, the check shows the command for your distro, and the window falls back to the terminal check (no steps, Settings or Play there).
