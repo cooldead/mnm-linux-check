@@ -162,7 +162,7 @@ On first start the window writes its font (Cinzel) and leather and iron textures
 - sets `PATH=~/.local/share/mnm/bin:$PATH:~/.local/bin`, so the launcher finds the wrapper first
 - `LD_PRELOAD`s the system's `libwayland-client.so.0`, because the AppImage's own copy gives a white window on new Mesa. `MNM_NO_WAYLAND_PRELOAD=1` skips this
 - with an old HarfBuzz only: `LD_PRELOAD`s the system's `libpangocairo`, `libpangoft2` and `libpango`. `MNM_NO_PANGO_PRELOAD=1` skips this
-- moves `launcher.log` to `launcher.log.old` once it's over 5 MB, then runs the launcher with its output added to `~/.local/share/mnm/launcher.log`
+- runs the launcher with its output saved to `~/.local/share/mnm/launcher.log`. The log holds the last run only: it starts fresh on every launch, stops at 2 MB, and leaves out GameMode's harmless `gamemodeauto: dlopen failed` lines. Any `launcher.log.old` left by an older version is deleted
 
 **3. The app-menu entry.** If the launcher already has one in `~/.local/share/applications`, its `Exec=` line is changed to the launch script, and the original is copied once to `~/.local/share/mnm/desktop-entry.backup`. If it has none, `mnm-launcher.desktop` is created. Then `update-desktop-database ~/.local/share/applications` runs, if you have it.
 

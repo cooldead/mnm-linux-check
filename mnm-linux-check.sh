@@ -331,18 +331,24 @@ for d in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib; do
   break
 done
 PANGO_SEEN=0; grep -qs 'undefined symbol: hb_ot_layout_get_horizontal_baseline_tag_for_script' "$MNM_HOME/launcher.log" && PANGO_SEEN=1
-LAUNCH_OK='^# mnm-launch [234]'; [ $OLD_HARFBUZZ = 1 ] && LAUNCH_OK='^# mnm-launch [34]'
+# A launch script that can start the launcher here, and the current one ("mnm-launch 5" keeps only the last
+# run in launcher.log; older ones kept every run, up to 10 MB). Only the first is required.
+LAUNCH_WORKS='^# mnm-launch [2345]'; [ $OLD_HARFBUZZ = 1 ] && LAUNCH_WORKS='^# mnm-launch [345]'
+LAUNCH_OK='^# mnm-launch 5'
 # Launch options from the window's Settings need "mnm-wrapper 3"; without them version 2 is still fine.
 WRAP_OK='^# mnm-wrapper [23]'; LAUNCH_OPTS=0
 grep -qs '^MNM_\(ENV\|PRE\|ARG\)=' "${XDG_CONFIG_HOME:-$HOME/.config}/mnm-on-linux/settings.conf" && { WRAP_OK='^# mnm-wrapper 3'; LAUNCH_OPTS=1; }
 WRAPPER_CURRENT=0
 grep -qs "$WRAP_OK" "$WRAP_DIR/umu-run" && grep -qs "$LAUNCH_OK" "$MNM_HOME/mnm-launcher.sh" && WRAPPER_CURRENT=1
+LAUNCH_WORKS_NOW=0; grep -qs "$LAUNCH_WORKS" "$MNM_HOME/mnm-launcher.sh" && LAUNCH_WORKS_NOW=1
 WHITE_SEEN=0; grep -qs 'Could not create default EGL display' "$MNM_HOME/launcher.log" && WHITE_SEEN=1
 if [ $WRAPPER_INSTALLED = 1 ] && [ $WRAPPER_CURRENT = 0 ]; then
-  if [ $OLD_HARFBUZZ = 1 ]; then
+  if [ $OLD_HARFBUZZ = 1 ] && [ $LAUNCH_WORKS_NOW = 0 ]; then
     bad "The launcher fix is an older version, and on this system the launcher needs the new one: its bundled text library (Pango) needs a newer HarfBuzz than your system has, so the launcher quits at once$([ $PANGO_SEEN = 1 ] && echo ' — your launcher log shows this')"
   elif [ $LAUNCH_OPTS = 1 ] && grep -qs '^# mnm-wrapper 2' "$WRAP_DIR/umu-run"; then
     warn "The launcher fix is an older version that ignores the launch options in Settings"
+  elif grep -qs '^# mnm-launch [34]' "$MNM_HOME/mnm-launcher.sh" && grep -qs "$WRAP_OK" "$WRAP_DIR/umu-run"; then
+    warn "The launcher fix is an older version: it works, but it keeps every launch in launcher.log (up to 10 MB); the new one keeps only the last run"
   else
     warn "The launcher fix is an older version: it works, but the window's Settings (GPU, MangoHud, GameMode…) need the new one, and on newer distros (Fedora 44, Bazzite…) the launcher window can stay white without it$([ $WHITE_SEEN = 1 ] && echo ' — your launcher log shows this')"
   fi
@@ -649,15 +655,16 @@ EOF
     LAUNCH=$MNM_HOME/mnm-launcher.sh
     cat > "$LAUNCH" <<EOF
 #!/usr/bin/env bash
-# mnm-launch 4 — starts the Monsters & Memories launcher with the umu-run wrapper first in PATH,
-# saving its output to launcher.log (written by MnM on Linux / mnm-linux-check.sh).
+# mnm-launch 5 — starts the Monsters & Memories launcher with the umu-run wrapper first in PATH,
+# saving the output of this run only to launcher.log (written by MnM on Linux / mnm-linux-check.sh).
 APP=\$(find "$(dirname "$APPIMAGE")" -maxdepth 1 -iname 'MonstersAndMemories*.appimage' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 # Moved since the fix was applied? Look in the usual folders too, rather than doing nothing.
 [ -n "\$APP" ] || APP=\$(find "\$HOME/Games/MonstersAndMemories" "\$HOME/Applications" "\$HOME/Downloads" "\$HOME/Desktop" "\$HOME/Games" "\$HOME/.local/bin" "\$HOME" /opt \\
   -maxdepth 1 -iname 'MonstersAndMemories*.appimage' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 if [ -z "\$APP" ]; then
   msg="Can't find the Monsters & Memories launcher (MonstersAndMemories*.AppImage) in $(dirname "$APPIMAGE") or the usual folders. Open MnM on Linux and choose where it is."
-  echo "mnm-launch: \$msg" >> "$MNM_HOME/launcher.log"
+  rm -f "$MNM_HOME/launcher.log.old"
+  echo "mnm-launch: \$msg" > "$MNM_HOME/launcher.log"
   command -v notify-send >/dev/null && notify-send -a "Monsters & Memories" "Launcher not found" "\$msg"
   exit 1
 fi
@@ -686,9 +693,15 @@ if [ -z "\${MNM_NO_PANGO_PRELOAD:-}" ]; then
     break
   done
 fi
+# The log holds this run only (MnM on Linux reads it when something goes wrong): it starts fresh each time,
+# stops growing at 2 MB, and leaves out GameMode's "dlopen failed" lines. Those come from helper processes
+# that can't load libgamemode; the game itself still gets GameMode. awk keeps reading past 2 MB, so the
+# launcher never sees a closed pipe. Launch scripts before "mnm-launch 5" kept every run, up to 10 MB.
 LOG="$MNM_HOME/launcher.log"
-[ -f "\$LOG" ] && [ "\$(stat -c%s "\$LOG")" -gt 5000000 ] && mv -f "\$LOG" "\$LOG.old"
-exec "\$APP" "\$@" >> "\$LOG" 2>&1
+rm -f "\$LOG.old"
+exec > >(awk -v max=2000000 '/gamemodeauto: dlopen failed/ { next }
+  n < max { n += length(\$0) + 1; print; if (n >= max) print "mnm-launch: the log reached 2 MB, so the rest of this run is not saved"; fflush() }' > "\$LOG") 2>&1
+exec "\$APP" "\$@"
 EOF
     chmod +x "$LAUNCH"
     ok "Wrote $(tilde "$LAUNCH")"
@@ -887,7 +900,7 @@ if [ "$GUI" = 1 ]; then
   else step umu todo; fi
   if [ $WRAPPER_INSTALLED = 1 ] && [ $LAUNCH_DIR_WRONG = 1 ]; then step fix moved "$(tilde "$(dirname "$APPIMAGE")")"
   elif [ $WRAPPER_CURRENT = 1 ]; then step fix done
-  elif [ $WRAPPER_INSTALLED = 1 ] && [ $OLD_HARFBUZZ = 1 ]; then step fix needed   # the old fix can't start the launcher here
+  elif [ $WRAPPER_INSTALLED = 1 ] && [ $OLD_HARFBUZZ = 1 ] && [ $LAUNCH_WORKS_NOW = 0 ]; then step fix needed   # the old fix can't start the launcher here
   elif [ $WRAPPER_INSTALLED = 1 ]; then step fix update; else step fix todo; fi
   if [ -n "$GAME_DIR" ] && [ -f "$GAME_DIR/mnm.exe" ]; then step game done "$(tilde "$GAME_DIR")"; else step game todo; fi
   [ "${empty:-0}" -gt 0 ] && step prefix damaged "$PREFIX"

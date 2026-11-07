@@ -36,7 +36,7 @@ CHECK_SCRIPT = r'''@@CHECK_SCRIPT@@'''
 CINZEL_FONT = "@@CINZEL_FONT@@"
 
 APP_NAME = "MnM on Linux"
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.3.0"
 TITLE = APP_NAME
 APP_ID = "io.github.mnm.LinuxCheck"
 REPO = "cooldead/mnm-linux-check"
@@ -1287,8 +1287,9 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                            "the moment you press Play. This adds a small umu-run wrapper that removes them and "
                            "uses your Settings, plus an app-menu entry “Monsters & Memories”.",
                            "Apply fix", self.do_fix),
-                  "update": ("Your launcher fix is an older version. Update it so your Settings are used and the "
-                             "launcher window doesn't stay white on newer distros.",
+                  "update": ("Your launcher fix is an older version. Update it so your Settings are used, the "
+                             "launcher window doesn't stay white on newer distros, and launcher.log only keeps "
+                             "the last run.",
                              "Update fix", self.do_fix),
                   "moved": ("Required: the launcher fix still looks for the launcher in the folder it used to be "
                             "in, so the “Monsters & Memories” app-menu entry does nothing. Update it to use the "
@@ -2048,7 +2049,7 @@ def run_gui(Gtk, Gdk, Gio, GLib, args):
                 "• ~/.local/share/mnm/bin/umu-run — a small wrapper that removes the AppImage's leaked "
                 "Python/GTK settings before starting the real umu-run\n"
                 "• ~/.local/share/mnm/mnm-launcher.sh — starts the launcher with that wrapper and saves "
-                "its output to ~/.local/share/mnm/launcher.log\n"
+                "the output of the last run to ~/.local/share/mnm/launcher.log (at most 2 MB)\n"
                 "• Your Monsters & Memories app-menu entry is pointed at that script (the original is "
                 "backed up first), or a new entry is created\n\n"
                 "Close the launcher first, then start it from the app menu afterwards.")
